@@ -2,156 +2,121 @@
 
 A web-based DVD player that faithfully reproduces the full DVD experience — menus, navigation, chapter selection, and all — in the browser.
 
-Pop in your DVD, point webdvd at the `VIDEO_TS` folder, and relive 1999 in a browser tab.
+Point webdvd at a `VIDEO_TS` folder and relive 1999 in a browser tab.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│                  Browser                     │
-│                                              │
-│  ┌──────────┐  ┌──────────┐  ┌───────────┐  │
-│  │  IFO VM  │  │ Subpic   │  │  MPEG-2   │  │
-│  │ (nav     │  │ Renderer │  │  Decoder   │  │
-│  │  engine) │  │ (menus)  │  │  (WASM)   │  │
-│  └────┬─────┘  └────┬─────┘  └─────┬─────┘  │
-│       │              │              │         │
-│       └──────────┬───┘──────────────┘         │
-│                  │                            │
-│           ┌──────┴──────┐                     │
-│           │ DVD Session │                     │
-│           │  Manager    │                     │
-│           └──────┬──────┘                     │
-└──────────────────┼────────────────────────────┘
-                   │ HTTP / WebSocket
-┌──────────────────┼────────────────────────────┐
-│           ┌──────┴──────┐                     │
-│           │ Disc Server │    Local machine     │
-│           │ (Go/Rust)   │                      │
-│           └──────┬──────┘                     │
-│                  │                            │
-│           ┌──────┴──────┐                     │
-│           │  VIDEO_TS/  │                     │
-│           └─────────────┘                     │
-└───────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│                    Browser                       │
+│                                                  │
+│  ┌──────────────────┐  ┌─────────────────────┐   │
+│  │ libdvdnav (WASM) │  │ Subpicture Renderer │   │
+│  │ - IFO parsing     │  │ - RLE decode        │   │
+│  │ - Navigation VM   │  │ - Button highlights  │   │
+│  │ - PGC execution   │  │ - Canvas overlay     │   │
+│  │ - Button handling │  │                     │   │
+│  └────────┬─────────┘  └──────────┬──────────┘   │
+│           │                       │               │
+│     ┌─────┴───────────────────────┴─────┐         │
+│     │       DVD Session Manager (TS)     │         │
+│     │  - Orchestrates VM + video + menus │         │
+│     │  - User input routing              │         │
+│     └──────────────┬────────────────────┘         │
+│                    │  <video> element              │
+└────────────────────┼──────────────────────────────┘
+                     │ HTTP / WebSocket
+┌────────────────────┼──────────────────────────────┐
+│            ┌───────┴────────┐                      │
+│            │  Rust Server   │     Local machine     │
+│            │  (axum/tokio)  │                       │
+│            └───────┬────────┘                      │
+│                    │                               │
+│  ┌─────────────────┼──────────────────┐            │
+│  │ ffmpeg subprocess                  │            │
+│  │ MPEG-2/AC-3 → H.264/AAC → fMP4    │            │
+│  └─────────────────┬──────────────────┘            │
+│                    │                               │
+│            ┌───────┴────────┐                      │
+│            │   VIDEO_TS/    │                      │
+│            └────────────────┘                      │
+└────────────────────────────────────────────────────┘
 ```
 
-## Components
+## How It Works
 
-### 1. Disc Server (local)
+**Server (Rust):** A local axum server reads a `VIDEO_TS` directory and transcodes MPEG-2/AC-3 video to H.264/AAC on the fly via ffmpeg. The browser gets standard MP4 it can play natively.
 
-A lightweight local server that reads a `VIDEO_TS` directory and serves its contents over HTTP.
+**Navigation (WASM):** The canonical `libdvdnav` and `libdvdread` C libraries are compiled to WebAssembly via Emscripten. This gives us battle-tested DVD navigation — the same code that powers VLC and Kodi — running in the browser. The VM executes IFO commands, manages registers, handles PGC chains, and drives the entire disc experience.
 
-**Endpoints:**
-- `GET /ifo/:file` — serve parsed IFO/BUP files (raw or as JSON)
-- `GET /vob/:title/:sector?count=N` — serve VOB sectors by logical block address
-- `GET /disc` — disc metadata (titles, duration, audio/subtitle tracks)
+**Menus (Canvas):** DVD subpicture overlays (RLE-encoded bitmaps) are decoded and rendered on a `<canvas>` layer over the video. Button highlights, click regions, and arrow-key navigation are driven by PCI packets parsed by libdvdnav.
 
-**Tech:** Go or Rust. Minimal dependencies. Handles CSS decryption via libdvdcss if reading from a physical drive, or serves pre-decrypted VIDEO_TS folders directly.
+## Tech Stack
 
-### 2. IFO Navigation VM (browser)
+| Component | Technology |
+|-----------|-----------|
+| Server | Rust (axum + tokio) |
+| Video transcode | ffmpeg subprocess (MPEG-2 → H.264/AAC → fMP4) |
+| DVD navigation | libdvdnav/libdvdread → WASM (Emscripten) |
+| Browser app | TypeScript + Vite |
+| Video playback | Native `<video>` + MediaSource Extensions |
+| Menu rendering | `<canvas>` overlay |
 
-A JavaScript/WASM reimplementation of the DVD navigation virtual machine.
+## Quick Start
 
-**What it does:**
-- Executes the register-based VM defined in the IFO files
-- Manages 24 system parameter registers (SPRMs) — current title, chapter, audio stream, subpicture stream, player region, parental level, etc.
-- Manages 16 general purpose registers (GPRMs) — used by disc authors for menu state, easter eggs, branching logic
-- Handles ~16 VM instructions: jump, link, compare, set register, etc.
-- Processes PGC (Program Chain) navigation: pre/post commands, cell commands
-- Drives the entire user experience — every menu transition, every "play movie" action flows through this VM
+```bash
+# Start the server (requires ffmpeg installed)
+cd server
+cargo run -- /path/to/VIDEO_TS
 
-**Reference:** `libdvdnav` (C, GPL) is the canonical implementation.
+# In another terminal, start the player
+cd player
+npm install
+npm run dev
+```
 
-### 3. Subpicture / Menu Renderer (browser)
-
-Renders DVD menus as interactive overlays on a `<canvas>`.
-
-**What it does:**
-- Decodes subpicture units (RLE-encoded bitmaps) from VOB streams
-- Renders button highlight overlays with correct palette/contrast
-- Maps button coordinates from PCI (Presentation Control Information) packets to clickable regions
-- Handles button state transitions: normal → selected → activated
-- Supports button navigation (up/down/left/right routing between buttons)
-- Composites subpicture overlay on top of still frame or looping video background
-
-### 4. MPEG-2 Decoder (browser, WASM)
-
-Decodes the MPEG-2 Program Stream format used by DVDs.
-
-**Options (in order of preference):**
-1. **Minimal MPEG-2 WASM decoder** — compile a focused MPEG-2 decoder (e.g., libmpeg2) to WASM. Small, fast, purpose-built.
-2. **ffmpeg.wasm** — heavier but handles every edge case. Good fallback.
-3. **Transcode on server** — re-encode to H.264 on the fly. Simplest browser-side, but adds server load and latency, breaks seamless VOB transitions.
-
-**Must support:**
-- MPEG-2 video demux from VOB (Program Stream) containers
-- Audio: AC3 (Dolby Digital), DTS, LPCM, MPEG audio
-- Seamless playback across VOB boundaries (cells can span multiple VOBs)
-
-### 5. DVD Session Manager (browser)
-
-Orchestrates the other components. The central state machine.
-
-- Receives navigation commands from the IFO VM ("play cell 3 of PGC 1 in title set 2")
-- Requests the right VOB sectors from the disc server
-- Feeds data to the MPEG-2 decoder
-- Tells the subpicture renderer when to show/hide overlays
-- Handles user input (remote control actions) and routes them to the VM
-- Manages playback state: play, pause, fast-forward, chapter skip
+Open http://localhost:5173 to watch your DVD.
 
 ## Milestones
 
-### M0: Foundation
-- [ ] Set up project structure (monorepo: `server/`, `player/`)
-- [ ] Disc server: serve raw files from a VIDEO_TS directory over HTTP
-- [ ] IFO parser: parse VMG (Video Manager) and VTS (Video Title Set) IFO files into structured data
-- [ ] Basic browser shell with video element
+### M0: Video on Screen
+- [x] Project structure (Rust server + TypeScript player)
+- [x] Rust server serves VIDEO_TS, transcodes via ffmpeg
+- [x] Browser plays transcoded video in `<video>` element
 
-### M1: Straight-to-Movie Playback
-- [ ] VOB sector serving with byte-range support
-- [ ] MPEG-2 decoding in WASM (video only, single title)
-- [ ] Audio decoding (AC3 at minimum)
-- [ ] Continuous playback across VOB file boundaries
-- [ ] Basic transport controls (play/pause/seek)
+### M1: libdvdnav in WASM
+- [ ] Compile libdvdnav + libdvdread to WASM via Emscripten
+- [ ] JS bindings: open disc, get title info, execute navigation
+- [ ] I/O adapter: VIDEO_TS files fetched from server → Emscripten virtual FS
+- [ ] Browser queries disc structure (titles, chapters, audio tracks) via WASM
 
-### M2: Navigation VM
-- [ ] Implement the IFO VM instruction set
-- [ ] SPRM/GPRM register management
-- [ ] PGC navigation (program chains, cells, pre/post commands)
-- [ ] Title/chapter selection working through the VM
-- [ ] First Play PGC execution (what happens when you "insert the disc")
+### M2: VM-Driven Playback
+- [ ] Wire libdvdnav block reading to session manager
+- [ ] First Play PGC executes automatically on "disc insert"
+- [ ] VM navigates to root menu or main title
+- [ ] Title/chapter selection through the VM
 
 ### M3: Menus
 - [ ] Subpicture stream parsing and RLE decoding
 - [ ] Button highlight rendering on canvas overlay
 - [ ] PCI packet parsing for button coordinates and commands
-- [ ] Click/keyboard input mapped to button activation
-- [ ] Button-to-button navigation (arrow key routing)
-- [ ] Menu-to-content and content-to-menu transitions
+- [ ] Click/keyboard → button activation → VM command → navigation
+- [ ] Full menu → movie → menu flow
 
 ### M4: Full Experience
+- [ ] Subtitle rendering during playback
+- [ ] Audio/subtitle stream switching
+- [ ] Seamless VOB boundary transitions
 - [ ] Multi-angle support
-- [ ] Subtitle rendering (subpicture streams during playback, not just menus)
-- [ ] Audio stream switching
-- [ ] Parental control levels
-- [ ] Region code handling
-- [ ] Resume from stop
-
-### M5: Polish
-- [ ] Faithful transition timing (match real player behavior)
 - [ ] Disc library / collection view
-- [ ] Player skin themes (remember those?)
-- [ ] Mobile touch support for menu interaction
 
 ## Prior Art & References
 
-- **libdvdnav** / **libdvdread** — C libraries for DVD navigation and reading. The definitive reference for the IFO VM and disc structure.
-- **libdvdcss** — CSS decryption library.
-- **dvdauthor** — DVD authoring tool. Useful reference for understanding the IFO format from the creator's side.
-- **MPEG-2 spec (ISO 13818)** — the video/audio codec spec.
-- **DVD-Video spec (ECMA-267 / ISO/IEC 16448)** — UDF filesystem used by DVDs.
-- [DVD-Video information](http://dvd.sourceforge.net/dvdinfo/) — community-maintained spec documentation.
+- **[libdvdnav](https://github.com/xbmc/libdvdnav)** / **[libdvdread](https://github.com/xbmc/libdvdread)** — canonical C libraries for DVD navigation and reading (compiled to WASM for this project)
+- **[libav.js](https://github.com/Yahweasel/libav.js)** — precedent for compiling C multimedia libs to WASM
+- **[DVD.js](https://github.com/gmarty/DVD.js)** — 2014 proof-of-concept JS DVD player (reference only)
+- **[dvd.sourceforge.net/dvdinfo](http://dvd.sourceforge.net/dvdinfo/)** — community DVD spec documentation
+- **[Inside DVD-Video (Wikibooks)](https://en.wikibooks.org/wiki/Inside_DVD-Video)** — VM instruction set, NAV packs, subpicture format
 
 ## License
 

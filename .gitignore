@@ -1,0 +1,4 @@
+server/target/
+player/node_modules/
+player/dist/
+wasm/build/
