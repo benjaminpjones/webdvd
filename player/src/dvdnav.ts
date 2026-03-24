@@ -21,6 +21,7 @@ interface DvdnavBindings {
   open: (path: string) => number;
   close: () => void;
   error: () => string;
+  titlePlay: (title: number) => number;
   getNumTitles: () => number;
   getNumParts: (title: number) => number;
   getNumAngles: (title: number) => number;
@@ -103,6 +104,7 @@ function bindFunctions(mod: DvdnavModule): DvdnavBindings {
     open: w("dvd_open", "number", ["string"]) as DvdnavBindings["open"],
     close: w("dvd_close", null, []) as DvdnavBindings["close"],
     error: w("dvd_error", "string", []) as DvdnavBindings["error"],
+    titlePlay: w("dvd_title_play", "number", ["number"]) as DvdnavBindings["titlePlay"],
     getNumTitles: w("dvd_get_num_titles", "number", []) as DvdnavBindings["getNumTitles"],
     getNumParts: w("dvd_get_num_parts", "number", ["number"]) as DvdnavBindings["getNumParts"],
     getNumAngles: w("dvd_get_num_angles", "number", ["number"]) as DvdnavBindings["getNumAngles"],
@@ -175,6 +177,12 @@ export async function openDisc(): Promise<DiscStructure> {
       durationMs: info.duration_ms,
       chapterTimesMs: info.chapter_times_ms,
     });
+  }
+
+  // Navigate into title 1 to start the VM — video/audio attribute
+  // queries require the VM to be in a specific VTS.
+  if (numTitles > 0) {
+    dvd.titlePlay(1);
   }
 
   const numAudio = dvd.getNumAudioStreams();

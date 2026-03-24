@@ -45,6 +45,14 @@ const char* dvd_error(void) {
     return dvdnav_err_to_string(nav);
 }
 
+/* --- Navigation (starts the VM) --- */
+
+EMSCRIPTEN_KEEPALIVE
+int dvd_title_play(int title) {
+    if (!nav) return -1;
+    return dvdnav_title_play(nav, title) == DVDNAV_STATUS_OK ? 0 : -1;
+}
+
 /* --- Title/Chapter Info --- */
 
 EMSCRIPTEN_KEEPALIVE
