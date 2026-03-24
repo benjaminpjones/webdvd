@@ -73,6 +73,43 @@ impl Disc {
             .collect()
     }
 
+    /// List all IFO and BUP filenames in the VIDEO_TS directory.
+    pub fn ifo_files(&self) -> Vec<String> {
+        let mut files = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&self.path) {
+            for entry in entries.flatten() {
+                let name = entry
+                    .file_name()
+                    .to_string_lossy()
+                    .to_uppercase();
+                if name.ends_with(".IFO") || name.ends_with(".BUP") {
+                    files.push(name.to_string());
+                }
+            }
+        }
+        files.sort();
+        files
+    }
+
+    /// Get the full path to a VIDEO_TS file by name (IFO/BUP only).
+    /// Returns None if the file doesn't exist or the name is invalid.
+    pub fn video_ts_file(&self, filename: &str) -> Option<PathBuf> {
+        let upper = filename.to_uppercase();
+        // Validate: must be IFO or BUP, no path separators
+        if (!upper.ends_with(".IFO") && !upper.ends_with(".BUP"))
+            || filename.contains('/')
+            || filename.contains('\\')
+        {
+            return None;
+        }
+        let path = self.path.join(&upper);
+        if path.is_file() {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
     /// List available title sets (by number).
     pub fn titlesets(&self) -> Vec<u32> {
         let mut sets: Vec<u32> = self

@@ -1,4 +1,5 @@
 server/target/
 player/node_modules/
 player/dist/
+player/public/wasm/
 wasm/build/

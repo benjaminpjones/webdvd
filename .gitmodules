@@ -1,0 +1,6 @@
+[submodule "wasm/lib/libdvdread"]
+	path = wasm/lib/libdvdread
+	url = https://github.com/xbmc/libdvdread.git
+[submodule "wasm/lib/libdvdnav"]
+	path = wasm/lib/libdvdnav
+	url = https://github.com/xbmc/libdvdnav.git

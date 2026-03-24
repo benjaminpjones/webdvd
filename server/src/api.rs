@@ -13,6 +13,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/disc", get(disc_info))
         .route("/api/transcode/{titleset}", get(transcode_titleset))
+        .route("/api/ifo-list", get(ifo_list))
+        .route("/api/ifo/{filename}", get(ifo_file))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -24,6 +26,29 @@ async fn disc_info(State(state): State<AppState>) -> Json<serde_json::Value> {
         "titlesets": titlesets,
         "vob_count": state.disc.vob_count(),
     }))
+}
+
+async fn ifo_list(State(state): State<AppState>) -> Json<Vec<String>> {
+    Json(state.disc.ifo_files())
+}
+
+async fn ifo_file(
+    State(state): State<AppState>,
+    Path(filename): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let path = state
+        .disc
+        .video_ts_file(&filename)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("File not found: {filename}")))?;
+
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+        bytes,
+    ))
 }
 
 async fn transcode_titleset(
