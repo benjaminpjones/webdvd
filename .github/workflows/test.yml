@@ -21,7 +21,7 @@ jobs:
         run: ./wasm/build.sh
 
       - name: Install test disc tools
-        run: sudo apt-get update && sudo apt-get install -y dvdauthor
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg dvdauthor
 
       - name: Generate test disc
         run: ./scripts/make-test-disc.sh
