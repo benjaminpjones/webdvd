@@ -62,20 +62,69 @@ Point webdvd at a `VIDEO_TS` folder and relive 1999 in a browser tab.
 | Video playback | Native `<video>` + MediaSource Extensions |
 | Menu rendering | `<canvas>` overlay |
 
+## Prerequisites
+
+- [Rust](https://rustup.rs/) (for the server)
+- [Node.js](https://nodejs.org/) >= 18 (for the player)
+- [ffmpeg](https://ffmpeg.org/) (for video transcoding)
+- [Emscripten](https://emscripten.org/docs/getting_started/downloads.html) (for building the WASM module)
+- [dvdauthor](http://dvdauthor.sourceforge.net/) (optional, for generating the test disc)
+
 ## Quick Start
 
 ```bash
-# Start the server (requires ffmpeg installed)
-cd server
-cargo run -- /path/to/VIDEO_TS
+# 1. Build the WASM module (requires emcc on PATH)
+./wasm/build.sh
 
-# In another terminal, start the player
+# 2. Generate a test disc (requires ffmpeg + dvdauthor)
+./scripts/make-test-disc.sh
+
+# 3. Start the server
+cd server
+cargo run -- /tmp/webdvd-test/VIDEO_TS
+
+# 4. In another terminal, start the player
 cd player
 npm install
 npm run dev
 ```
 
 Open http://localhost:5173 to watch your DVD.
+
+To use a real DVD, point the server at its `VIDEO_TS` directory instead of the test disc.
+
+## Testing
+
+```bash
+# WASM smoke test — verifies libdvdnav IFO parsing (Node.js, no browser)
+# Requires: test disc generated, WASM built
+node wasm/test.mjs
+
+# E2E browser test — headless Chromium via Playwright
+# Starts both servers automatically
+cd player
+npx playwright install chromium  # first time only
+npm test
+```
+
+CI runs the WASM smoke test on every push/PR via GitHub Actions.
+
+## Project Structure
+
+```
+server/          Rust server (axum) — VIDEO_TS serving + ffmpeg transcode
+player/          TypeScript + Vite browser app
+  src/main.ts    App entry point
+  src/dvdnav.ts  WASM module wrapper
+  e2e/           Playwright tests
+wasm/
+  lib/           Git submodules (libdvdread, libdvdnav)
+  src/glue.c     C glue layer (EMSCRIPTEN_KEEPALIVE exports)
+  src/config.h   Emscripten build config
+  build.sh       Compiles C sources → dvdnav.js + dvdnav.wasm
+  test.mjs       Node.js smoke test
+scripts/         Dev utilities (test disc generation)
+```
 
 ## Milestones
 
@@ -85,10 +134,10 @@ Open http://localhost:5173 to watch your DVD.
 - [x] Browser plays transcoded video in `<video>` element
 
 ### M1: libdvdnav in WASM
-- [ ] Compile libdvdnav + libdvdread to WASM via Emscripten
-- [ ] JS bindings: open disc, get title info, execute navigation
-- [ ] I/O adapter: VIDEO_TS files fetched from server → Emscripten virtual FS
-- [ ] Browser queries disc structure (titles, chapters, audio tracks) via WASM
+- [x] Compile libdvdnav + libdvdread to WASM via Emscripten
+- [x] JS bindings: open disc, get title info, execute navigation
+- [x] I/O adapter: VIDEO_TS files fetched from server → Emscripten virtual FS
+- [x] Browser queries disc structure (titles, chapters, audio tracks) via WASM
 
 ### M2: VM-Driven Playback
 - [ ] Wire libdvdnav block reading to session manager

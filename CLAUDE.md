@@ -14,6 +14,9 @@ webdvd — a web-based DVD player with faithful menu reproduction.
 ## Development
 
 ```bash
+# Build WASM (requires emcc on PATH)
+./wasm/build.sh
+
 # Generate test disc (requires ffmpeg + dvdauthor)
 ./scripts/make-test-disc.sh
 
@@ -22,11 +25,15 @@ cd server && cargo run -- /tmp/webdvd-test/VIDEO_TS
 
 # Run player (separate terminal)
 cd player && npm run dev
+
+# Tests
+node wasm/test.mjs            # WASM smoke test (Node.js)
+cd player && npm test          # Playwright e2e (headless browser)
 ```
 
 ## Current Status
 
-M0 (video on screen) is complete. Next: M1 (libdvdnav WASM). See README.md for full milestone plan.
+M0 and M1 are complete. Next: M2 (VM-driven playback). See README.md for full milestone plan.
 
 ## Key Research
 
