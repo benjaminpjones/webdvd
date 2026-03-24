@@ -1,0 +1,30 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  wasm-smoke-test:
+    name: WASM smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: mymindstorm/setup-emsdk@v14
+
+      - name: Build WASM
+        run: ./wasm/build.sh
+
+      - name: Install test disc tools
+        run: sudo apt-get update && sudo apt-get install -y dvdauthor
+
+      - name: Generate test disc
+        run: ./scripts/make-test-disc.sh
+
+      - name: Run WASM smoke test
+        run: node wasm/test.mjs
