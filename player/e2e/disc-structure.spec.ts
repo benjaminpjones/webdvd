@@ -26,14 +26,15 @@ test.describe("DVD disc structure via WASM", () => {
     // Should contain aspect ratio
     await expect(discStructure).toContainText("4:3");
 
-    // Should contain at least one title
+    // Should contain all 3 titles
     await expect(discStructure).toContainText("Title 1:");
+    await expect(discStructure).toContainText("Title 2:");
+    await expect(discStructure).toContainText("Title 3:");
 
-    // Should contain chapter count
-    await expect(discStructure).toContainText("chapter(s)");
-
-    // Should contain duration (test disc is 10 seconds)
-    await expect(discStructure).toContainText("0:10");
+    // Title 1: 2 chapters, ~8s
+    await expect(discStructure).toContainText("2 chapter(s)");
+    // Title 2: 3 chapters, ~10s
+    await expect(discStructure).toContainText("3 chapter(s)");
 
     // No JS errors related to WASM (exclude known harmless libdvdnav warnings)
     const knownWarnings = [
@@ -58,8 +59,8 @@ test.describe("DVD disc structure via WASM", () => {
       timeout: 15_000,
     });
 
-    // Should show title count
-    await expect(discInfo).toContainText("title(s)");
+    // Should show 3 titles
+    await expect(discInfo).toContainText("3 title(s)");
   });
 
   test("title buttons are rendered", async ({ page }) => {
@@ -94,6 +95,42 @@ test.describe("DVD disc structure via WASM", () => {
     expect(state.error).toBeNull();
     expect(state.paused).toBe(false);
     expect(state.readyState).toBeGreaterThanOrEqual(2); // HAVE_CURRENT_DATA
+    expect(state.duration).toBeGreaterThan(0);
+  });
+
+  test("title switching changes video source and plays", async ({ page }) => {
+    await page.goto("/");
+
+    const status = page.locator("#status");
+    const video = page.locator("#video");
+
+    // Wait for auto-play to start (First Play PGC → title 2)
+    await expect(status).toContainText("Playing", { timeout: 30_000 });
+    const autoSrc = await video.getAttribute("src");
+    expect(autoSrc).toContain("/api/transcode/");
+
+    // Click a different title — pick one that isn't currently playing
+    // First Play PGC targets title 2, so click title 3 to guarantee a switch
+    const title3Btn = page.locator(".title-btn[data-title='3']");
+    await title3Btn.click();
+
+    // Wait for the new title to start playing
+    await expect(status).toContainText("Playing title 3", { timeout: 30_000 });
+
+    // Verify video source changed to a different VTS
+    const newSrc = await video.getAttribute("src");
+    expect(newSrc).not.toBe(autoSrc);
+
+    // Verify video is actually playing (not stalled/errored)
+    const state = await video.evaluate((v: HTMLVideoElement) => ({
+      paused: v.paused,
+      readyState: v.readyState,
+      error: v.error?.message ?? null,
+      duration: v.duration,
+    }));
+    expect(state.error).toBeNull();
+    expect(state.paused).toBe(false);
+    expect(state.readyState).toBeGreaterThanOrEqual(2);
     expect(state.duration).toBeGreaterThan(0);
   });
 });

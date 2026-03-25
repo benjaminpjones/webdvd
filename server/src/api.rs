@@ -1,6 +1,6 @@
 use axum::{
     Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json},
     routing::get,
@@ -76,9 +76,16 @@ async fn vob_file(
     ))
 }
 
+#[derive(serde::Deserialize, Default)]
+struct TranscodeParams {
+    ss: Option<f64>,
+    t: Option<f64>,
+}
+
 async fn transcode_titleset(
     State(state): State<AppState>,
     Path(titleset): Path<u32>,
+    Query(params): Query<TranscodeParams>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let vobs = state.disc.vobs_for_titleset(titleset);
     if vobs.is_empty() {
@@ -88,7 +95,12 @@ async fn transcode_titleset(
         ));
     }
 
-    let body = transcode::transcode_to_stream(&vobs)
+    let opts = transcode::TranscodeOpts {
+        start_secs: params.ss,
+        duration_secs: params.t,
+    };
+
+    let body = transcode::transcode_to_stream(&vobs, &opts)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

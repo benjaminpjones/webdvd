@@ -84,10 +84,16 @@ async function main() {
   // Test structure queries
   console.log("\nDisc structure:");
   const numTitles = dvd.getNumTitles();
-  assert(numTitles >= 1, `has at least 1 title (got ${numTitles})`);
+  assert(numTitles === 3, `has 3 titles (got ${numTitles})`);
 
-  const numParts = dvd.getNumParts(1);
-  assert(numParts >= 1, `title 1 has at least 1 chapter (got ${numParts})`);
+  const numParts1 = dvd.getNumParts(1);
+  assert(numParts1 === 2, `title 1 has 2 chapters (got ${numParts1})`);
+
+  const numParts2 = dvd.getNumParts(2);
+  assert(numParts2 === 3, `title 2 has 3 chapters (got ${numParts2})`);
+
+  const numParts3 = dvd.getNumParts(3);
+  assert(numParts3 === 1, `title 3 has 1 chapter (got ${numParts3})`);
 
   const numAngles = dvd.getNumAngles(1);
   assert(numAngles >= 1, `title 1 has at least 1 angle (got ${numAngles})`);
@@ -114,14 +120,14 @@ async function main() {
     assert(channels >= 1, `audio stream 0 has at least 1 channel (got ${channels})`);
   }
 
-  // Title description (JSON)
-  const titleJson = dvd.describeTitle(1);
-  const titleInfo = JSON.parse(titleJson);
-  assert(titleInfo.chapters >= 1, `describe_title reports at least 1 chapter (got ${titleInfo.chapters})`);
-  assert(titleInfo.duration_ms > 0, `describe_title reports positive duration (got ${titleInfo.duration_ms}ms)`);
+  // Title descriptions (JSON)
+  const title2Json = dvd.describeTitle(2);
+  const title2Info = JSON.parse(title2Json);
+  assert(title2Info.chapters === 3, `title 2 describe reports 3 chapters (got ${title2Info.chapters})`);
+  assert(title2Info.duration_ms > 0, `title 2 has positive duration (got ${title2Info.duration_ms}ms)`);
   assert(
-    Array.isArray(titleInfo.chapter_times_ms),
-    `describe_title returns chapter_times_ms array`
+    Array.isArray(title2Info.chapter_times_ms) && title2Info.chapter_times_ms.length === 3,
+    `title 2 has 3 chapter_times_ms entries (got ${title2Info.chapter_times_ms?.length})`
   );
 
   // M2: Test navigation event loop
@@ -149,8 +155,8 @@ async function main() {
   const getNextEvent = Module.cwrap("dvd_get_next_event", "string", []);
   const stillSkip = Module.cwrap("dvd_still_skip", "number", []);
 
-  // After open, the VM is at First Play PGC. Drive events until we see
-  // a CELL_CHANGE in VTS domain (title playback).
+  // After open, the VM is at First Play PGC which jumps to title 2.
+  // Drive events until we see a CELL_CHANGE in VTS domain.
   let foundVtsCell = false;
   let sawVtsChange = false;
   for (let i = 0; i < 20; i++) {
@@ -162,8 +168,8 @@ async function main() {
     }
     if (ev.event === 6 && ev.isVts && ev.title > 0) { // CELL_CHANGE in VTS
       foundVtsCell = true;
-      assert(ev.title === 1, `event loop reaches title 1 (got ${ev.title})`);
-      assert(ev.part >= 1, `event loop has part >= 1 (got ${ev.part})`);
+      assert(ev.title === 2, `First Play PGC reaches title 2 (got ${ev.title})`);
+      assert(ev.part === 1, `starts at chapter 1 (got ${ev.part})`);
       break;
     }
     if (ev.event === 2) { // STILL_FRAME
@@ -179,7 +185,7 @@ async function main() {
   }
 
   assert(sawVtsChange, "saw VTS_CHANGE event during navigation");
-  assert(foundVtsCell, "reached CELL_CHANGE in VTS domain (title playback)");
+  assert(foundVtsCell, "First Play PGC navigated to title 2 in VTS domain");
 
   // Cleanup
   dvd.close();
