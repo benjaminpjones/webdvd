@@ -110,6 +110,34 @@ impl Disc {
         }
     }
 
+    /// List all VOB filenames in the VIDEO_TS directory.
+    pub fn vob_files(&self) -> Vec<String> {
+        self.vobs
+            .iter()
+            .filter_map(|p| {
+                Some(p.file_name()?.to_string_lossy().to_uppercase())
+            })
+            .collect()
+    }
+
+    /// Get the full path to a VOB file by name.
+    /// Returns None if the file doesn't exist or the name is invalid.
+    pub fn vob_file(&self, filename: &str) -> Option<PathBuf> {
+        let upper = filename.to_uppercase();
+        if !upper.ends_with(".VOB")
+            || filename.contains('/')
+            || filename.contains('\\')
+        {
+            return None;
+        }
+        let path = self.path.join(&upper);
+        if path.is_file() {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
     /// List available title sets (by number).
     pub fn titlesets(&self) -> Vec<u32> {
         let mut sets: Vec<u32> = self

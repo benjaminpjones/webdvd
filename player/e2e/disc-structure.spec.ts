@@ -50,25 +50,50 @@ test.describe("DVD disc structure via WASM", () => {
     expect(wasmErrors).toHaveLength(0);
   });
 
-  test("displays server disc info", async ({ page }) => {
+  test("displays disc info from session", async ({ page }) => {
     await page.goto("/");
 
     const discInfo = page.locator("#disc-info");
     await expect(discInfo).not.toHaveText("Loading disc info...", {
-      timeout: 10_000,
+      timeout: 15_000,
     });
 
-    // Should show VOB count and titleset info
-    await expect(discInfo).toContainText("VOB files");
-    await expect(discInfo).toContainText("title set(s)");
+    // Should show title count
+    await expect(discInfo).toContainText("title(s)");
   });
 
-  test("titleset buttons are rendered", async ({ page }) => {
+  test("title buttons are rendered", async ({ page }) => {
     await page.goto("/");
 
-    // Wait for buttons to appear
-    const btn = page.locator(".titleset-btn").first();
-    await expect(btn).toBeVisible({ timeout: 10_000 });
-    await expect(btn).toHaveText("Title Set 1");
+    // Wait for title buttons to appear
+    const btn = page.locator(".title-btn").first();
+    await expect(btn).toBeVisible({ timeout: 15_000 });
+    await expect(btn).toContainText("Title 1");
+  });
+
+  test("VM-driven auto-play starts video", async ({ page }) => {
+    await page.goto("/");
+
+    // Wait for status to show playing
+    const status = page.locator("#status");
+    await expect(status).toContainText("Playing", { timeout: 30_000 });
+
+    // Video element should have a src set
+    const video = page.locator("#video");
+    const src = await video.getAttribute("src");
+    expect(src).toContain("/api/transcode/");
+
+    // Video should actually be playing (not stalled/errored)
+    const state = await video.evaluate((v: HTMLVideoElement) => ({
+      paused: v.paused,
+      readyState: v.readyState,
+      error: v.error?.message ?? null,
+      currentTime: v.currentTime,
+      duration: v.duration,
+    }));
+    expect(state.error).toBeNull();
+    expect(state.paused).toBe(false);
+    expect(state.readyState).toBeGreaterThanOrEqual(2); // HAVE_CURRENT_DATA
+    expect(state.duration).toBeGreaterThan(0);
   });
 });

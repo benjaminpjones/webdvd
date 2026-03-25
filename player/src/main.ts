@@ -1,37 +1,12 @@
 import "./style.css";
-import { openDisc, type DiscStructure } from "./dvdnav";
-
-const API_BASE = "http://localhost:3000";
-
-interface DiscInfo {
-  path: string;
-  titlesets: number[];
-  vob_count: number;
-}
+import { initSession, type DiscStructure } from "./dvdnav";
+import { SessionManager } from "./session";
 
 const video = document.getElementById("video") as HTMLVideoElement;
 const discInfoEl = document.getElementById("disc-info")!;
-const titlesetSelectEl = document.getElementById("titleset-select")!;
+const titleSelectEl = document.getElementById("title-select")!;
 const discStructureEl = document.getElementById("disc-structure")!;
-
-async function loadDiscInfo(): Promise<DiscInfo> {
-  const res = await fetch(`${API_BASE}/api/disc`);
-  if (!res.ok) throw new Error(`Failed to load disc info: ${res.statusText}`);
-  return res.json();
-}
-
-function playTitleset(titleset: number) {
-  video.src = `${API_BASE}/api/transcode/${titleset}`;
-  video.load();
-  video.play();
-
-  document.querySelectorAll(".titleset-btn").forEach((btn) => {
-    btn.classList.toggle(
-      "active",
-      btn.getAttribute("data-titleset") === String(titleset),
-    );
-  });
-}
+const statusEl = document.getElementById("status")!;
 
 function formatDuration(ms: number): string {
   const totalSec = Math.floor(ms / 1000);
@@ -79,37 +54,65 @@ function displayDiscStructure(structure: DiscStructure) {
   discStructureEl.innerHTML = lines.join("<br>");
 }
 
+function buildTitleButtons(structure: DiscStructure, sm: SessionManager) {
+  titleSelectEl.innerHTML = "";
+
+  for (const t of structure.titles) {
+    // Title button
+    const titleBtn = document.createElement("button");
+    titleBtn.className = "title-btn";
+    titleBtn.setAttribute("data-title", String(t.title));
+    titleBtn.textContent = `Title ${t.title} (${formatDuration(t.durationMs)})`;
+    titleBtn.addEventListener("click", () => sm.selectTitle(t.title));
+    titleSelectEl.appendChild(titleBtn);
+
+    // Chapter buttons (if more than 1 chapter)
+    if (t.chapters > 1) {
+      const chapterDiv = document.createElement("span");
+      chapterDiv.className = "chapter-buttons";
+      for (let c = 1; c <= t.chapters; c++) {
+        const chapBtn = document.createElement("button");
+        chapBtn.className = "chapter-btn";
+        chapBtn.textContent = `Ch ${c}`;
+        chapBtn.addEventListener("click", () => sm.selectChapter(t.title, c));
+        chapterDiv.appendChild(chapBtn);
+      }
+      titleSelectEl.appendChild(chapterDiv);
+    }
+  }
+}
+
 async function init() {
   try {
-    const disc = await loadDiscInfo();
-    discInfoEl.textContent = `${disc.path} — ${disc.vob_count} VOB files, ${disc.titlesets.length} title set(s)`;
+    statusEl.textContent = "Loading WASM module...";
 
-    titlesetSelectEl.innerHTML = "";
-    for (const ts of disc.titlesets) {
-      const btn = document.createElement("button");
-      btn.className = "titleset-btn";
-      btn.setAttribute("data-titleset", String(ts));
-      btn.textContent = `Title Set ${ts}`;
-      btn.addEventListener("click", () => playTitleset(ts));
-      titlesetSelectEl.appendChild(btn);
-    }
+    const session = await initSession();
+    const structure = session.getDiscStructure();
 
-    // Auto-play the first titleset
-    if (disc.titlesets.length > 0) {
-      playTitleset(disc.titlesets[0]);
-    }
-  } catch (err) {
-    discInfoEl.textContent = `Error: ${err}`;
-  }
-
-  // Load disc structure via WASM (in parallel with video playback)
-  try {
-    const structure = await openDisc();
     console.log("[dvdnav] Disc structure:", structure);
     displayDiscStructure(structure);
+    discInfoEl.textContent = `${structure.titleString || "DVD"} — ${structure.titles.length} title(s)`;
+
+    const sm = new SessionManager(session, video, structure, {
+      onStateChange: (state) => {
+        statusEl.textContent = state === "loading" ? "Loading..." :
+          state === "playing" ? `Playing title ${sm.title}, chapter ${sm.part}` :
+          state === "stopped" ? "Stopped" : "";
+      },
+      onLog: (msg) => {
+        // Shown in console via SessionManager, also update status briefly
+        statusEl.textContent = msg;
+      },
+    });
+
+    buildTitleButtons(structure, sm);
+
+    // Auto-play via First Play PGC
+    await sm.start();
   } catch (err) {
-    console.error("[dvdnav] Failed to open disc via WASM:", err);
-    discStructureEl.textContent = `WASM: ${err}`;
+    console.error("[init] Failed:", err);
+    discInfoEl.textContent = `Error: ${err}`;
+    statusEl.textContent = "";
   }
 }
 

@@ -57,12 +57,19 @@ body {
   color: #999;
 }
 
-#titleset-select {
-  display: flex;
-  gap: 8px;
+#status {
+  font-size: 13px;
+  color: #aaa;
 }
 
-.titleset-btn {
+#title-select {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.title-btn {
   background: #333;
   color: #eee;
   border: 1px solid #555;
@@ -72,11 +79,25 @@ body {
   font-size: 14px;
 }
 
-.titleset-btn:hover {
+.title-btn:hover {
   background: #444;
 }
 
-.titleset-btn.active {
-  background: #0066cc;
-  border-color: #0088ff;
+.chapter-buttons {
+  display: flex;
+  gap: 4px;
+}
+
+.chapter-btn {
+  background: #2a2a2a;
+  color: #ccc;
+  border: 1px solid #444;
+  border-radius: 3px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.chapter-btn:hover {
+  background: #3a3a3a;
 }

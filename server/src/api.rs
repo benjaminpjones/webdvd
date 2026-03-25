@@ -15,6 +15,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/transcode/{titleset}", get(transcode_titleset))
         .route("/api/ifo-list", get(ifo_list))
         .route("/api/ifo/{filename}", get(ifo_file))
+        .route("/api/vob-list", get(vob_list))
+        .route("/api/vob/{filename}", get(vob_file))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -51,6 +53,29 @@ async fn ifo_file(
     ))
 }
 
+async fn vob_list(State(state): State<AppState>) -> Json<Vec<String>> {
+    Json(state.disc.vob_files())
+}
+
+async fn vob_file(
+    State(state): State<AppState>,
+    Path(filename): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let path = state
+        .disc
+        .vob_file(&filename)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("VOB not found: {filename}")))?;
+
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+        bytes,
+    ))
+}
+
 async fn transcode_titleset(
     State(state): State<AppState>,
     Path(titleset): Path<u32>,
@@ -63,12 +88,12 @@ async fn transcode_titleset(
         ));
     }
 
-    let mp4_bytes = transcode::transcode_to_mp4(&vobs)
+    let body = transcode::transcode_to_stream(&vobs)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok((
         [(axum::http::header::CONTENT_TYPE, "video/mp4")],
-        mp4_bytes,
+        body,
     ))
 }

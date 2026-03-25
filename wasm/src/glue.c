@@ -27,10 +27,12 @@ int dvd_open(const char *path) {
         nav = NULL;
         return -1;
     }
-    /* Disable read-ahead cache — we only query structure in M1 */
+    /* Disable read-ahead cache — we discard MPEG-2 data anyway */
     dvdnav_set_readahead_flag(nav, 0);
     /* Set region mask to all regions */
     dvdnav_set_region_mask(nav, 0xFF);
+    /* Enable PGC-based positioning for accurate time reporting */
+    dvdnav_set_PGC_positioning_flag(nav, 1);
     return 0;
 }
 
@@ -162,9 +164,182 @@ int dvd_get_spu_lang(int stream) {
     return dvdnav_spu_stream_to_lang(nav, (uint8_t)stream);
 }
 
-/* --- Chapter duration info (returns JSON string) --- */
+/* --- VM Navigation (M2) --- */
+
+EMSCRIPTEN_KEEPALIVE
+int dvd_still_skip(void) {
+    if (!nav) return -1;
+    return dvdnav_still_skip(nav) == DVDNAV_STATUS_OK ? 0 : -1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int dvd_wait_skip(void) {
+    if (!nav) return -1;
+    return dvdnav_wait_skip(nav) == DVDNAV_STATUS_OK ? 0 : -1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int dvd_part_play(int title, int part) {
+    if (!nav) return -1;
+    return dvdnav_part_play(nav, title, part) == DVDNAV_STATUS_OK ? 0 : -1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int dvd_get_current_title(void) {
+    if (!nav) return -1;
+    int32_t title = 0, part = 0;
+    if (dvdnav_current_title_info(nav, &title, &part) != DVDNAV_STATUS_OK)
+        return -1;
+    return title;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int dvd_get_current_part(void) {
+    if (!nav) return -1;
+    int32_t title = 0, part = 0;
+    if (dvdnav_current_title_info(nav, &title, &part) != DVDNAV_STATUS_OK)
+        return -1;
+    return part;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int dvd_is_domain_vts(void) {
+    if (!nav) return 0;
+    return dvdnav_is_domain_vts(nav) ? 1 : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int dvd_is_domain_menu(void) {
+    if (!nav) return 0;
+    return (dvdnav_is_domain_vmgm(nav) || dvdnav_is_domain_vtsm(nav)) ? 1 : 0;
+}
+
+/*
+ * dvd_get_next_event() — Core M2 function.
+ *
+ * Loops dvdnav_get_next_block() internally, skipping BLOCK_OK / NAV_PACKET / NOP
+ * (discarding MPEG-2 data). Returns JSON string on the first "interesting" event.
+ * Has an iteration cap to avoid infinite WASM hangs.
+ *
+ * Returned JSON always has "event" (int). Additional fields depend on event type.
+ */
+static char event_buf[2048];  /* for dvdnav_get_next_block */
 
 static char json_buf[16384];
+
+EMSCRIPTEN_KEEPALIVE
+const char* dvd_get_next_event(void) {
+    if (!nav) return "{\"event\":-1,\"error\":\"not open\"}";
+
+    int32_t event = 0;
+    int32_t len = 0;
+    int iterations = 0;
+    const int MAX_ITER = 50000;
+
+    while (iterations++ < MAX_ITER) {
+        dvdnav_status_t status = dvdnav_get_next_block(nav,
+            (uint8_t*)event_buf, &event, &len);
+
+        if (status != DVDNAV_STATUS_OK) {
+            snprintf(json_buf, sizeof(json_buf),
+                "{\"event\":-1,\"error\":\"%s\"}", dvdnav_err_to_string(nav));
+            return json_buf;
+        }
+
+        switch (event) {
+        case DVDNAV_BLOCK_OK:
+        case DVDNAV_NAV_PACKET:
+        case DVDNAV_NOP:
+            /* Skip — discard MPEG-2 data, continue spinning */
+            continue;
+
+        case DVDNAV_CELL_CHANGE: {
+            dvdnav_cell_change_event_t *cell =
+                (dvdnav_cell_change_event_t*)event_buf;
+            int32_t title = 0, part = 0;
+            dvdnav_current_title_info(nav, &title, &part);
+            int is_vts = dvdnav_is_domain_vts(nav) ? 1 : 0;
+            snprintf(json_buf, sizeof(json_buf),
+                "{\"event\":6,\"cellN\":%d,\"pgN\":%d,"
+                "\"pgcLengthMs\":%lld,\"cellStartMs\":%lld,"
+                "\"title\":%d,\"part\":%d,\"isVts\":%d}",
+                cell->cellN, cell->pgN,
+                (long long)(cell->pgc_length / 90),
+                (long long)(cell->cell_start / 90),
+                (int)title, (int)part, is_vts);
+            return json_buf;
+        }
+
+        case DVDNAV_VTS_CHANGE: {
+            dvdnav_vts_change_event_t *vts =
+                (dvdnav_vts_change_event_t*)event_buf;
+            snprintf(json_buf, sizeof(json_buf),
+                "{\"event\":5,\"oldVtsN\":%d,\"newVtsN\":%d,"
+                "\"oldDomain\":%d,\"newDomain\":%d}",
+                vts->old_vtsN, vts->new_vtsN,
+                (int)vts->old_domain, (int)vts->new_domain);
+            return json_buf;
+        }
+
+        case DVDNAV_STILL_FRAME: {
+            dvdnav_still_event_t *still =
+                (dvdnav_still_event_t*)event_buf;
+            snprintf(json_buf, sizeof(json_buf),
+                "{\"event\":2,\"stillLength\":%d}", still->length);
+            return json_buf;
+        }
+
+        case DVDNAV_WAIT:
+            /* No internal FIFO to drain — skip immediately and continue */
+            dvdnav_wait_skip(nav);
+            continue;
+
+        case DVDNAV_STOP:
+            return "{\"event\":8}";
+
+        case DVDNAV_HOP_CHANNEL:
+            return "{\"event\":12}";
+
+        case DVDNAV_SPU_STREAM_CHANGE: {
+            dvdnav_spu_stream_change_event_t *spu =
+                (dvdnav_spu_stream_change_event_t*)event_buf;
+            snprintf(json_buf, sizeof(json_buf),
+                "{\"event\":3,\"physicalWide\":%d,\"physicalLetterbox\":%d,"
+                "\"physicalPanScan\":%d,\"logical\":%d}",
+                spu->physical_wide, spu->physical_letterbox,
+                spu->physical_pan_scan, spu->logical);
+            return json_buf;
+        }
+
+        case DVDNAV_AUDIO_STREAM_CHANGE: {
+            dvdnav_audio_stream_change_event_t *audio =
+                (dvdnav_audio_stream_change_event_t*)event_buf;
+            snprintf(json_buf, sizeof(json_buf),
+                "{\"event\":4,\"physical\":%d,\"logical\":%d}",
+                audio->physical, audio->logical);
+            return json_buf;
+        }
+
+        case DVDNAV_SPU_CLUT_CHANGE:
+            /* Colour table update — not needed until M3 */
+            continue;
+
+        case DVDNAV_HIGHLIGHT:
+            /* Button highlight — not needed until M3 */
+            continue;
+
+        default:
+            snprintf(json_buf, sizeof(json_buf),
+                "{\"event\":%d}", event);
+            return json_buf;
+        }
+    }
+
+    /* Safety valve — yielded after MAX_ITER without an interesting event */
+    return "{\"event\":-2,\"error\":\"iteration limit\"}";
+}
+
+/* --- Chapter duration info (returns JSON string) --- */
 
 EMSCRIPTEN_KEEPALIVE
 const char* dvd_describe_title(int title) {

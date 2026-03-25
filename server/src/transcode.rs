@@ -1,10 +1,13 @@
 use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
+use tokio_util::io::ReaderStream;
 
-/// Transcode a list of VOB files into H.264/AAC MP4, returning the raw bytes.
-/// Uses ffmpeg's concat demuxer to join multiple VOBs seamlessly.
-pub async fn transcode_to_mp4(vob_files: &[&Path]) -> anyhow::Result<Vec<u8>> {
+/// Spawn ffmpeg to transcode VOB files into H.264/AAC fMP4, returning a
+/// streaming body. Playback can begin as soon as the first fragment arrives.
+pub async fn transcode_to_stream(
+    vob_files: &[&Path],
+) -> anyhow::Result<axum::body::Body> {
     if vob_files.is_empty() {
         anyhow::bail!("No VOB files to transcode");
     }
@@ -20,11 +23,11 @@ pub async fn transcode_to_mp4(vob_files: &[&Path]) -> anyhow::Result<Vec<u8>> {
     std::fs::write(concat_file.path(), &concat_list)?;
 
     tracing::info!(
-        "Transcoding {} VOB file(s) to MP4",
+        "Transcoding {} VOB file(s) to streaming fMP4",
         vob_files.len()
     );
 
-    let output = Command::new("ffmpeg")
+    let mut child = Command::new("ffmpeg")
         .args([
             "-y",
             "-f", "concat",
@@ -39,21 +42,32 @@ pub async fn transcode_to_mp4(vob_files: &[&Path]) -> anyhow::Result<Vec<u8>> {
             "-c:a", "aac",
             "-b:a", "192k",
             "-ac", "2",
-            "-movflags", "+faststart+frag_keyframe+empty_moov",
+            "-movflags", "+frag_keyframe+empty_moov",
             "-f", "mp4",
             "pipe:1",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+        .stderr(Stdio::null())
+        .spawn()?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("ffmpeg failed: {}", stderr);
-    }
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to capture ffmpeg stdout"))?;
 
-    tracing::info!("Transcoded {} bytes", output.stdout.len());
-    Ok(output.stdout)
+    // Spawn a background task to wait for ffmpeg to finish and keep the
+    // concat tempfile alive for the duration of the transcode.
+    tokio::spawn(async move {
+        let status = child.wait().await;
+        drop(concat_file); // keep tempfile alive until ffmpeg exits
+        match status {
+            Ok(s) if s.success() => tracing::info!("ffmpeg exited successfully"),
+            Ok(s) => tracing::warn!("ffmpeg exited with status: {s}"),
+            Err(e) => tracing::error!("ffmpeg wait error: {e}"),
+        }
+    });
+
+    let stream = ReaderStream::new(stdout);
+    Ok(axum::body::Body::from_stream(stream))
 }

@@ -124,6 +124,63 @@ async function main() {
     `describe_title returns chapter_times_ms array`
   );
 
+  // M2: Test navigation event loop
+  console.log("\nTesting VM event loop (dvd_get_next_event)...");
+
+  // Re-open disc with VOB files loaded (needed for block reading)
+  dvd.close();
+
+  // Load ALL files (including VOBs) for the event loop test
+  const allFiles = readdirSync(videoTsDir).filter(
+    (f) => f.endsWith(".IFO") || f.endsWith(".BUP") || f.endsWith(".VOB")
+  );
+  // Re-create MEMFS dirs (module is the same, dirs may still exist)
+  try { Module.FS.mkdir("/dvd2"); } catch (_) {}
+  try { Module.FS.mkdir("/dvd2/VIDEO_TS"); } catch (_) {}
+  for (const name of allFiles) {
+    const data = readFileSync(join(videoTsDir, name));
+    Module.FS.writeFile(`/dvd2/VIDEO_TS/${name}`, new Uint8Array(data));
+  }
+  console.log(`  Loaded ${allFiles.length} files (incl. VOBs) into MEMFS`);
+
+  const rc2 = dvd.open("/dvd2/VIDEO_TS");
+  assert(rc2 === 0, `dvd_open (re-open with VOBs) returns 0 (got ${rc2})`);
+
+  const getNextEvent = Module.cwrap("dvd_get_next_event", "string", []);
+  const stillSkip = Module.cwrap("dvd_still_skip", "number", []);
+
+  // After open, the VM is at First Play PGC. Drive events until we see
+  // a CELL_CHANGE in VTS domain (title playback).
+  let foundVtsCell = false;
+  let sawVtsChange = false;
+  for (let i = 0; i < 20; i++) {
+    const json = getNextEvent();
+    const ev = JSON.parse(json);
+
+    if (ev.event === 5) { // VTS_CHANGE
+      sawVtsChange = true;
+    }
+    if (ev.event === 6 && ev.isVts && ev.title > 0) { // CELL_CHANGE in VTS
+      foundVtsCell = true;
+      assert(ev.title === 1, `event loop reaches title 1 (got ${ev.title})`);
+      assert(ev.part >= 1, `event loop has part >= 1 (got ${ev.part})`);
+      break;
+    }
+    if (ev.event === 2) { // STILL_FRAME
+      stillSkip();
+    }
+    if (ev.event === 8) { // STOP
+      break;
+    }
+    if (ev.event < 0) {
+      console.error(`  Event error: ${ev.error}`);
+      break;
+    }
+  }
+
+  assert(sawVtsChange, "saw VTS_CHANGE event during navigation");
+  assert(foundVtsCell, "reached CELL_CHANGE in VTS domain (title playback)");
+
   // Cleanup
   dvd.close();
 

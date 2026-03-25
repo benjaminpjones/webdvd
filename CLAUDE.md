@@ -1,15 +1,6 @@
 # CLAUDE.md
 
-## Project
-
-webdvd — a web-based DVD player with faithful menu reproduction.
-
-## Architecture Decisions
-
-- **Rust server (axum/tokio)** handles VIDEO_TS serving and MPEG-2 → H.264/AAC transcode via ffmpeg subprocess
-- **libdvdnav/libdvdread compiled to WASM** via Emscripten for browser-side DVD navigation (IFO parsing, VM, PGC execution, button handling)
-- **TypeScript + Vite** browser app orchestrates WASM navigation + native `<video>` playback + `<canvas>` menu overlays
-- DVD.js (2014 JS port) was evaluated and rejected — stale, incomplete. We use the canonical C libs via WASM instead.
+See README.md for architecture, design details, and milestones.
 
 ## Development
 
@@ -31,14 +22,18 @@ node wasm/test.mjs            # WASM smoke test (Node.js)
 cd player && npm test          # Playwright e2e (headless browser)
 ```
 
-## Current Status
+## Validation
 
-M0 and M1 are complete. Next: M2 (VM-driven playback). See README.md for full milestone plan.
+**Always run the e2e tests before submitting changes:**
 
-## Key Research
+```bash
+cd player && npm test
+```
 
-- DVD IFO VM: ~8 instruction categories, 64-bit opcodes, 24 SPRMs + 16 GPRMs. Spec at dvd.sourceforge.net/dvdinfo/
-- Subpictures: 2bpp RLE, 4 colors from 16-entry CLUT, button highlights in PCI packets
-- MPEG-2 has no native browser support — hence server-side transcode
-- AC-3 audio has no native browser support either
-- libav.js is precedent for compiling C multimedia libs to WASM via Emscripten
+Playwright auto-starts both servers. The e2e suite verifies disc structure, title buttons, and that VM-driven auto-play actually starts video playback (not just that a URL was set).
+
+## Gotchas
+
+- **WASM MEMFS must include VOB files** — not just IFOs. The VM calls `dvdnav_get_next_block()` which reads NAV packs from VOBs. Without VOBs in MEMFS, the event loop fails silently and playback never starts.
+- **`dvd_get_next_event()` discards MPEG-2 data** — it loops `dvdnav_get_next_block()` internally, skipping BLOCK_OK/NAV_PACKET/NOP. Only navigation events come back to JS. The server handles actual video transcoding separately.
+- **Menu fallback** — if the disc's First Play PGC lands in a menu (infinite still), the session manager falls back to `titlePlay(1)`. Real menu support is M3.
