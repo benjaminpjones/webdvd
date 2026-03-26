@@ -11,6 +11,18 @@
         <video id="video" controls></video>
         <canvas id="overlay"></canvas>
       </div>
+      <div id="remote">
+        <div class="remote-nav">
+          <button data-dir="up" aria-label="Up" title="Up">&#9650;</button>
+          <div class="remote-row">
+            <button data-dir="left" aria-label="Left" title="Left">&#9664;</button>
+            <button data-action="enter" aria-label="Enter" title="Enter">OK</button>
+            <button data-dir="right" aria-label="Right" title="Right">&#9654;</button>
+          </div>
+          <button data-dir="down" aria-label="Down" title="Down">&#9660;</button>
+        </div>
+        <button data-action="menu" class="remote-menu-btn" title="Return to Menu">Menu</button>
+      </div>
       <div id="controls">
         <div id="disc-info">Loading disc info...</div>
         <div id="status"></div>

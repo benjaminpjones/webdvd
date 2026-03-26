@@ -17,6 +17,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/ifo/{filename}", get(ifo_file))
         .route("/api/vob-list", get(vob_list))
         .route("/api/vob/{filename}", get(vob_file))
+        .route("/api/transcode-menu/{titleset}", get(transcode_menu))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -80,6 +81,29 @@ async fn vob_file(
 struct TranscodeParams {
     ss: Option<f64>,
     t: Option<f64>,
+}
+
+/// Transcode a menu VOB (titleset=0 for VMGM, N for VTS_N menu).
+async fn transcode_menu(
+    State(state): State<AppState>,
+    Path(titleset): Path<u32>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let vobs = state.disc.menu_vobs(titleset);
+    if vobs.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("No menu VOBs found for titleset {titleset}"),
+        ));
+    }
+
+    let body = transcode::transcode_to_stream(&vobs, &Default::default())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "video/mp4")],
+        body,
+    ))
 }
 
 async fn transcode_titleset(

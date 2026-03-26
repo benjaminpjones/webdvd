@@ -7,9 +7,11 @@
 
 #include <emscripten.h>
 #include <dvdnav/dvdnav.h>
+#include <dvdnav/dvdnav_events.h>
 #include <dvdread/dvd_reader.h>
 #include <dvdread/ifo_read.h>
 #include <dvdread/ifo_types.h>
+#include <dvdread/nav_types.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -320,13 +322,33 @@ const char* dvd_get_next_event(void) {
             return json_buf;
         }
 
-        case DVDNAV_SPU_CLUT_CHANGE:
-            /* Colour table update — not needed until M3 */
-            continue;
+        case DVDNAV_SPU_CLUT_CHANGE: {
+            /* Colour lookup table — 16 entries of {0, Y, Cr, Cb} */
+            uint32_t *clut = (uint32_t*)event_buf;
+            int pos = 0;
+            pos += snprintf(json_buf + pos, sizeof(json_buf) - pos,
+                "{\"event\":10,\"clut\":[");
+            for (int i = 0; i < 16 && pos < (int)sizeof(json_buf) - 32; i++) {
+                if (i > 0) json_buf[pos++] = ',';
+                pos += snprintf(json_buf + pos, sizeof(json_buf) - pos,
+                    "%u", (unsigned)clut[i]);
+            }
+            pos += snprintf(json_buf + pos, sizeof(json_buf) - pos, "]}");
+            return json_buf;
+        }
 
-        case DVDNAV_HIGHLIGHT:
-            /* Button highlight — not needed until M3 */
-            continue;
+        case DVDNAV_HIGHLIGHT: {
+            dvdnav_highlight_event_t *hl =
+                (dvdnav_highlight_event_t*)event_buf;
+            snprintf(json_buf, sizeof(json_buf),
+                "{\"event\":9,\"display\":%d,\"buttonN\":%u,"
+                "\"palette\":%u,\"sx\":%u,\"sy\":%u,\"ex\":%u,\"ey\":%u}",
+                hl->display, (unsigned)hl->buttonN,
+                (unsigned)hl->palette,
+                (unsigned)hl->sx, (unsigned)hl->sy,
+                (unsigned)hl->ex, (unsigned)hl->ey);
+            return json_buf;
+        }
 
         default:
             snprintf(json_buf, sizeof(json_buf),
@@ -337,6 +359,117 @@ const char* dvd_get_next_event(void) {
 
     /* Safety valve — yielded after MAX_ITER without an interesting event */
     return "{\"event\":-2,\"error\":\"iteration limit\"}";
+}
+
+/* --- Menu / Button Interaction (M3) --- */
+
+EMSCRIPTEN_KEEPALIVE
+int dvd_get_current_button(void) {
+    if (!nav) return 0;
+    int32_t btn = 0;
+    dvdnav_get_current_highlight(nav, &btn);
+    return btn;
+}
+
+/*
+ * dvd_get_buttons() — return JSON array of all valid buttons in the current PCI.
+ * Each entry has: buttonN, x0, y0, x1, y1, up, down, left, right, auto_action.
+ * Returns "[]" if no buttons or no PCI available.
+ */
+EMSCRIPTEN_KEEPALIVE
+const char* dvd_get_buttons(void) {
+    if (!nav) return "[]";
+    pci_t *pci = dvdnav_get_current_nav_pci(nav);
+    if (!pci) return "[]";
+
+    int num_buttons = pci->hli.hl_gi.btn_ns;
+    if (num_buttons <= 0 || num_buttons > 36) return "[]";
+
+    int pos = 0;
+    pos += snprintf(json_buf + pos, sizeof(json_buf) - pos, "[");
+    for (int i = 0; i < num_buttons && pos < (int)sizeof(json_buf) - 200; i++) {
+        btni_t *btn = &pci->hli.btnit[i];
+        if (i > 0) json_buf[pos++] = ',';
+        pos += snprintf(json_buf + pos, sizeof(json_buf) - pos,
+            "{\"buttonN\":%d,\"x0\":%u,\"y0\":%u,\"x1\":%u,\"y1\":%u,"
+            "\"up\":%u,\"down\":%u,\"left\":%u,\"right\":%u,\"auto\":%u}",
+            i + 1,
+            (unsigned)btn->x_start, (unsigned)btn->y_start,
+            (unsigned)btn->x_end, (unsigned)btn->y_end,
+            (unsigned)btn->up, (unsigned)btn->down,
+            (unsigned)btn->left, (unsigned)btn->right,
+            (unsigned)btn->auto_action_mode);
+    }
+    pos += snprintf(json_buf + pos, sizeof(json_buf) - pos, "]");
+    return json_buf;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int dvd_button_activate(void) {
+    if (!nav) return -1;
+    pci_t *pci = dvdnav_get_current_nav_pci(nav);
+    if (!pci) return -1;
+    return dvdnav_button_activate(nav, pci) == DVDNAV_STATUS_OK ? 0 : -1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int dvd_button_select_up(void) {
+    if (!nav) return -1;
+    pci_t *pci = dvdnav_get_current_nav_pci(nav);
+    if (!pci) return -1;
+    return dvdnav_upper_button_select(nav, pci) == DVDNAV_STATUS_OK ? 0 : -1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int dvd_button_select_down(void) {
+    if (!nav) return -1;
+    pci_t *pci = dvdnav_get_current_nav_pci(nav);
+    if (!pci) return -1;
+    return dvdnav_lower_button_select(nav, pci) == DVDNAV_STATUS_OK ? 0 : -1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int dvd_button_select_left(void) {
+    if (!nav) return -1;
+    pci_t *pci = dvdnav_get_current_nav_pci(nav);
+    if (!pci) return -1;
+    return dvdnav_left_button_select(nav, pci) == DVDNAV_STATUS_OK ? 0 : -1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int dvd_button_select_right(void) {
+    if (!nav) return -1;
+    pci_t *pci = dvdnav_get_current_nav_pci(nav);
+    if (!pci) return -1;
+    return dvdnav_right_button_select(nav, pci) == DVDNAV_STATUS_OK ? 0 : -1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int dvd_mouse_select(int x, int y) {
+    if (!nav) return -1;
+    pci_t *pci = dvdnav_get_current_nav_pci(nav);
+    if (!pci) return -1;
+    return dvdnav_mouse_select(nav, pci, x, y) == DVDNAV_STATUS_OK ? 0 : -1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int dvd_mouse_activate(int x, int y) {
+    if (!nav) return -1;
+    pci_t *pci = dvdnav_get_current_nav_pci(nav);
+    if (!pci) return -1;
+    return dvdnav_mouse_activate(nav, pci, x, y) == DVDNAV_STATUS_OK ? 0 : -1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int dvd_menu_call(int menu_id) {
+    if (!nav) return -1;
+    return dvdnav_menu_call(nav, (DVDMenuID_t)menu_id) == DVDNAV_STATUS_OK ? 0 : -1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int dvd_go_up(void) {
+    if (!nav) return -1;
+    return dvdnav_go_up(nav) == DVDNAV_STATUS_OK ? 0 : -1;
 }
 
 /* --- Chapter duration info (returns JSON string) --- */

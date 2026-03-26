@@ -101,3 +101,63 @@ body {
 .chapter-btn:hover {
   background: #3a3a3a;
 }
+
+/* On-screen DVD remote */
+#remote {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+#remote.visible {
+  display: flex;
+}
+
+.remote-nav {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.remote-row {
+  display: flex;
+  gap: 2px;
+}
+
+.remote-nav button {
+  width: 48px;
+  height: 40px;
+  background: #2a2a2a;
+  color: #ddd;
+  border: 1px solid #555;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.remote-nav button:hover {
+  background: #444;
+}
+
+.remote-nav button:active {
+  background: #555;
+}
+
+.remote-menu-btn {
+  background: #2a2a2a;
+  color: #ccc;
+  border: 1px solid #555;
+  border-radius: 4px;
+  padding: 6px 20px;
+  cursor: pointer;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.remote-menu-btn:hover {
+  background: #444;
+}

@@ -1,12 +1,17 @@
 import "./style.css";
 import { initSession, type DiscStructure } from "./dvdnav";
 import { SessionManager } from "./session";
+import { MenuOverlay } from "./overlay";
 
 const video = document.getElementById("video") as HTMLVideoElement;
+const overlay = document.getElementById("overlay") as HTMLCanvasElement;
 const discInfoEl = document.getElementById("disc-info")!;
 const titleSelectEl = document.getElementById("title-select")!;
 const discStructureEl = document.getElementById("disc-structure")!;
 const statusEl = document.getElementById("status")!;
+const remoteEl = document.getElementById("remote")!;
+
+const menuOverlay = new MenuOverlay(overlay);
 
 function formatDuration(ms: number): string {
   const totalSec = Math.floor(ms / 1000);
@@ -82,6 +87,67 @@ function buildTitleButtons(structure: DiscStructure, sm: SessionManager) {
   }
 }
 
+function setupRemote(sm: SessionManager) {
+  // Arrow buttons
+  for (const dir of ["up", "down", "left", "right"] as const) {
+    const btn = remoteEl.querySelector(`[data-dir="${dir}"]`);
+    btn?.addEventListener("click", () => sm.menuNavigate(dir));
+  }
+
+  // Enter button
+  remoteEl.querySelector("[data-action='enter']")?.addEventListener("click", () => {
+    sm.menuActivate();
+  });
+
+  // Menu button (return to root menu, DVD_MENU_Root = 3)
+  remoteEl.querySelector("[data-action='menu']")?.addEventListener("click", () => {
+    sm.returnToMenu();
+  });
+}
+
+function setupKeyboard(sm: SessionManager) {
+  document.addEventListener("keydown", (e) => {
+    if (sm.state !== "menu") return;
+
+    switch (e.key) {
+      case "ArrowUp":
+        e.preventDefault();
+        sm.menuNavigate("up");
+        break;
+      case "ArrowDown":
+        e.preventDefault();
+        sm.menuNavigate("down");
+        break;
+      case "ArrowLeft":
+        e.preventDefault();
+        sm.menuNavigate("left");
+        break;
+      case "ArrowRight":
+        e.preventDefault();
+        sm.menuNavigate("right");
+        break;
+      case "Enter":
+        e.preventDefault();
+        sm.menuActivate();
+        break;
+    }
+  });
+}
+
+function setupOverlayMouse(sm: SessionManager) {
+  overlay.addEventListener("click", (e) => {
+    if (sm.state !== "menu") return;
+    const pt = menuOverlay.screenToDvd(e.clientX, e.clientY);
+    if (pt) sm.menuClick(pt.x, pt.y);
+  });
+
+  overlay.addEventListener("mousemove", (e) => {
+    if (sm.state !== "menu") return;
+    const pt = menuOverlay.screenToDvd(e.clientX, e.clientY);
+    if (pt) sm.menuHover(pt.x, pt.y);
+  });
+}
+
 async function init() {
   try {
     statusEl.textContent = "Loading WASM module...";
@@ -97,15 +163,33 @@ async function init() {
       onStateChange: (state) => {
         statusEl.textContent = state === "loading" ? "Loading..." :
           state === "playing" ? `Playing title ${sm.title}, chapter ${sm.part}` :
+          state === "menu" ? "Menu" :
           state === "stopped" ? "Stopped" : "";
+
+        // Toggle overlay interactivity and remote visibility
+        const inMenu = state === "menu";
+        overlay.style.pointerEvents = inMenu ? "auto" : "none";
+        overlay.style.cursor = inMenu ? "pointer" : "default";
+        remoteEl.classList.toggle("visible", inMenu);
+
+        if (!inMenu) menuOverlay.clear();
+      },
+      onMenuChange: (menu) => {
+        if (menu) {
+          menuOverlay.render(menu);
+        } else {
+          menuOverlay.clear();
+        }
       },
       onLog: (msg) => {
-        // Shown in console via SessionManager, also update status briefly
         statusEl.textContent = msg;
       },
     });
 
     buildTitleButtons(structure, sm);
+    setupRemote(sm);
+    setupKeyboard(sm);
+    setupOverlayMouse(sm);
 
     // Auto-play via First Play PGC
     await sm.start();

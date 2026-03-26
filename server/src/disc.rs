@@ -138,6 +138,41 @@ impl Disc {
         }
     }
 
+    /// Get menu VOB files. Titleset 0 = VMGM (VIDEO_TS.VOB),
+    /// otherwise VTS_NN_0.VOB for the given titleset.
+    pub fn menu_vobs(&self, titleset: u32) -> Vec<&Path> {
+        if titleset == 0 {
+            // VMGM menu — VIDEO_TS.VOB
+            self.vobs
+                .iter()
+                .filter(|p| {
+                    let name = p
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_uppercase();
+                    name.starts_with("VIDEO_TS") && name.ends_with(".VOB")
+                })
+                .map(|p| p.as_path())
+                .collect()
+        } else {
+            // VTS menu — VTS_NN_0.VOB
+            let target = format!("VTS_{:02}_0.VOB", titleset);
+            self.vobs
+                .iter()
+                .filter(|p| {
+                    let name = p
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_uppercase();
+                    name == target
+                })
+                .map(|p| p.as_path())
+                .collect()
+        }
+    }
+
     /// List available title sets (by number).
     pub fn titlesets(&self) -> Vec<u32> {
         let mut sets: Vec<u32> = self

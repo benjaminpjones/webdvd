@@ -15,7 +15,10 @@ import {
   DVDNAV_HOP_CHANNEL,
   DVDNAV_SPU_STREAM_CHANGE,
   DVDNAV_AUDIO_STREAM_CHANGE,
+  DVDNAV_HIGHLIGHT,
+  DVDNAV_SPU_CLUT_CHANGE,
   type DiscStructure,
+  type ButtonInfo,
 } from "./dvdnav";
 
 const API_BASE = "http://localhost:3000";
@@ -27,7 +30,13 @@ export interface PlaybackTarget {
   seekTimeMs?: number;
 }
 
-export type SessionState = "idle" | "loading" | "playing" | "stopped";
+export type SessionState = "idle" | "loading" | "playing" | "menu" | "stopped";
+
+export interface MenuState {
+  buttons: ButtonInfo[];
+  currentButton: number;
+  clut: number[];
+}
 
 export class SessionManager {
   private session: DvdSession;
@@ -37,7 +46,9 @@ export class SessionManager {
   private currentTitle = 0;
   private currentPart = 0;
   private _state: SessionState = "idle";
+  private _menuState: MenuState | null = null;
   private onStateChange: ((state: SessionState) => void) | null = null;
+  private onMenuChange: ((menu: MenuState | null) => void) | null = null;
   private onLog: ((msg: string) => void) | null = null;
 
   constructor(
@@ -46,6 +57,7 @@ export class SessionManager {
     structure: DiscStructure,
     opts?: {
       onStateChange?: (state: SessionState) => void;
+      onMenuChange?: (menu: MenuState | null) => void;
       onLog?: (msg: string) => void;
     },
   ) {
@@ -53,6 +65,7 @@ export class SessionManager {
     this.video = video;
     this.structure = structure;
     this.onStateChange = opts?.onStateChange ?? null;
+    this.onMenuChange = opts?.onMenuChange ?? null;
     this.onLog = opts?.onLog ?? null;
   }
 
@@ -68,9 +81,18 @@ export class SessionManager {
     return this.currentPart;
   }
 
+  get menuState(): MenuState | null {
+    return this._menuState;
+  }
+
   private setState(state: SessionState) {
     this._state = state;
     this.onStateChange?.(state);
+  }
+
+  private setMenu(menu: MenuState | null) {
+    this._menuState = menu;
+    this.onMenuChange?.(menu);
   }
 
   private log(msg: string) {
@@ -89,6 +111,9 @@ export class SessionManager {
     const target = await this.driveVM();
     if (target) {
       this.playTarget(target);
+    } else if (this._state === "menu") {
+      // driveVM entered a menu — load menu background video
+      this.loadMenuVideo();
     } else {
       this.log("VM reached STOP without a playback target");
       this.setState("stopped");
@@ -129,12 +154,95 @@ export class SessionManager {
     }
   }
 
+  /* --- Menu interaction (M3) --- */
+
+  menuNavigate(direction: "up" | "down" | "left" | "right"): void {
+    if (this._state !== "menu") return;
+    this.session.buttonSelect(direction);
+    this.updateMenuHighlight();
+  }
+
+  async menuActivate(): Promise<void> {
+    if (this._state !== "menu") return;
+    this.log("Menu: activating button");
+    this.session.buttonActivate();
+    this.setMenu(null);
+    this.setState("loading");
+    const target = await this.driveVM();
+    if (target) {
+      this.playTarget(target);
+    } else if (this._state === "menu") {
+      this.loadMenuVideo();
+    }
+  }
+
+  async menuClick(dvdX: number, dvdY: number): Promise<void> {
+    if (this._state !== "menu") return;
+    this.log(`Menu: click at (${dvdX}, ${dvdY})`);
+    this.session.mouseActivate(dvdX, dvdY);
+    this.setMenu(null);
+    this.setState("loading");
+    const target = await this.driveVM();
+    if (target) {
+      this.playTarget(target);
+    } else if (this._state === "menu") {
+      this.loadMenuVideo();
+    }
+  }
+
+  /** Return to root menu (DVD_MENU_Root = 3) */
+  async returnToMenu(): Promise<void> {
+    this.log("Returning to root menu...");
+    this.video.pause();
+    this.video.removeAttribute("src");
+    this.session.menuCall(3); // DVD_MENU_Root
+    this.setState("loading");
+    const target = await this.driveVM();
+    if (target) {
+      this.playTarget(target);
+    } else if (this._state === "menu") {
+      this.loadMenuVideo();
+    }
+  }
+
+  menuHover(dvdX: number, dvdY: number): void {
+    if (this._state !== "menu") return;
+    this.session.mouseSelect(dvdX, dvdY);
+    this.updateMenuHighlight();
+  }
+
+  private updateMenuHighlight(): void {
+    const currentButton = this.session.getCurrentButton();
+    if (this._menuState && currentButton !== this._menuState.currentButton) {
+      this.setMenu({ ...this._menuState, currentButton });
+    }
+  }
+
   /**
-   * Drive the VM event loop until we find a playback target or reach STOP.
+   * Load the menu background video from the VMGM (titleset=0) transcode.
+   * The video shows the menu's background frame; the canvas overlay draws button highlights.
+   */
+  private loadMenuVideo(): void {
+    const url = `${API_BASE}/api/transcode-menu/0`;
+    this.log("Loading menu background video...");
+    this.video.src = url;
+    this.video.muted = true; // menus are silent; muted enables autoplay
+    this.video.loop = false;
+    this.video.load();
+    // Pause on the last frame — DVD menus are infinite stills
+    this.video.onended = () => {
+      this.video.currentTime = Math.max(0, this.video.duration - 0.1);
+      this.video.pause();
+    };
+    this.video.play().catch(() => {});
+  }
+
+  /**
+   * Drive the VM event loop until we find a playback target, enter a menu, or reach STOP.
    * Yields to the browser event loop periodically to avoid blocking UI.
    */
   private async driveVM(): Promise<PlaybackTarget | null> {
-    let menuStillCount = 0;
+    let clut: number[] = [];
     const MAX_ROUNDS = 100;
 
     for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -176,23 +284,32 @@ export class SessionManager {
 
         case DVDNAV_STILL_FRAME:
           if (ev.stillLength === 0xff) {
-            // Infinite still — likely a menu waiting for input (M3)
-            menuStillCount++;
-            this.log(
-              `Infinite still frame (menu) — skipping (attempt ${menuStillCount})`,
-            );
-            this.session.stillSkip();
-
-            if (menuStillCount >= 3) {
-              // Disc is stuck in a menu loop — fall back to title 1
-              this.log("Menu loop detected, falling back to title 1");
-              this.session.titlePlay(1);
-              menuStillCount = 0;
+            // Infinite still — this is a menu waiting for user input
+            const buttons = this.session.getButtons();
+            const currentButton = this.session.getCurrentButton();
+            if (buttons.length > 0) {
+              this.log(
+                `Menu: ${buttons.length} buttons, current=${currentButton}`,
+              );
+              this.setMenu({ buttons, currentButton, clut });
+              this.setState("menu");
+              return null; // Don't play — wait for user interaction
             }
+            // No buttons — skip the still (e.g. a non-interactive still frame)
+            this.log("Infinite still with no buttons — skipping");
+            this.session.stillSkip();
           } else {
             this.log(`Still frame: ${ev.stillLength}s — skipping`);
             this.session.stillSkip();
           }
+          continue;
+
+        case DVDNAV_SPU_CLUT_CHANGE:
+          if (ev.clut) clut = ev.clut;
+          continue;
+
+        case DVDNAV_HIGHLIGHT:
+          this.log(`Highlight: button=${ev.buttonN} display=${ev.display}`);
           continue;
 
         case DVDNAV_STOP:
@@ -231,6 +348,8 @@ export class SessionManager {
 
     const url = `${API_BASE}/api/transcode/${vts}`;
     this.video.src = url;
+    this.video.muted = false; // unmute for title playback
+    this.video.loop = false; // titles don't loop — onended resumes VM
     this.video.load();
 
     const onCanPlay = () => {
@@ -249,9 +368,19 @@ export class SessionManager {
 
     this.video.addEventListener("canplay", onCanPlay);
 
-    this.video.onended = () => {
-      this.log("Video ended");
-      this.setState("stopped");
+    this.video.onended = async () => {
+      this.log("Video ended — resuming VM for post-commands...");
+      // The disc may have post-commands (e.g. "call vmgm menu") that
+      // navigate back to a menu or to the next title.
+      this.session.stillSkip(); // signal that the still/end is done
+      const nextTarget = await this.driveVM();
+      if (nextTarget) {
+        this.playTarget(nextTarget);
+      } else if (this._state === "menu") {
+        this.loadMenuVideo();
+      } else if (this._state !== "stopped") {
+        this.setState("stopped");
+      }
     };
   }
 }

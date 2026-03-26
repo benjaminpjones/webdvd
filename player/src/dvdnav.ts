@@ -18,6 +18,8 @@ export const DVDNAV_VTS_CHANGE = 5;
 export const DVDNAV_CELL_CHANGE = 6;
 export const DVDNAV_NAV_PACKET = 7;
 export const DVDNAV_STOP = 8;
+export const DVDNAV_HIGHLIGHT = 9;
+export const DVDNAV_SPU_CLUT_CHANGE = 10;
 export const DVDNAV_HOP_CHANNEL = 12;
 export const DVDNAV_WAIT = 13;
 
@@ -61,6 +63,18 @@ interface DvdnavBindings {
   getNumSpuStreams: () => number;
   getSpuLang: (stream: number) => number;
   describeTitle: (title: number) => string;
+  /* Menu / Button (M3) */
+  getCurrentButton: () => number;
+  getButtons: () => string;
+  buttonActivate: () => number;
+  buttonSelectUp: () => number;
+  buttonSelectDown: () => number;
+  buttonSelectLeft: () => number;
+  buttonSelectRight: () => number;
+  mouseSelect: (x: number, y: number) => number;
+  mouseActivate: (x: number, y: number) => number;
+  menuCall: (menuId: number) => number;
+  goUp: () => number;
 }
 
 /* --- Public types --- */
@@ -82,8 +96,26 @@ export interface NavEvent {
   newDomain?: number;
   /* STILL_FRAME fields */
   stillLength?: number;
+  /* HIGHLIGHT fields */
+  display?: number;
+  buttonN?: number;
+  /* SPU_CLUT_CHANGE fields */
+  clut?: number[];
   /* Error */
   error?: string;
+}
+
+export interface ButtonInfo {
+  buttonN: number;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  up: number;
+  down: number;
+  left: number;
+  right: number;
+  auto: number;
 }
 
 export interface TitleInfo {
@@ -175,6 +207,18 @@ function bindFunctions(mod: DvdnavModule): DvdnavBindings {
     getNumSpuStreams: w("dvd_get_num_spu_streams", "number", []) as DvdnavBindings["getNumSpuStreams"],
     getSpuLang: w("dvd_get_spu_lang", "number", ["number"]) as DvdnavBindings["getSpuLang"],
     describeTitle: w("dvd_describe_title", "string", ["number"]) as DvdnavBindings["describeTitle"],
+    /* Menu / Button (M3) */
+    getCurrentButton: w("dvd_get_current_button", "number", []) as DvdnavBindings["getCurrentButton"],
+    getButtons: w("dvd_get_buttons", "string", []) as DvdnavBindings["getButtons"],
+    buttonActivate: w("dvd_button_activate", "number", []) as DvdnavBindings["buttonActivate"],
+    buttonSelectUp: w("dvd_button_select_up", "number", []) as DvdnavBindings["buttonSelectUp"],
+    buttonSelectDown: w("dvd_button_select_down", "number", []) as DvdnavBindings["buttonSelectDown"],
+    buttonSelectLeft: w("dvd_button_select_left", "number", []) as DvdnavBindings["buttonSelectLeft"],
+    buttonSelectRight: w("dvd_button_select_right", "number", []) as DvdnavBindings["buttonSelectRight"],
+    mouseSelect: w("dvd_mouse_select", "number", ["number", "number"]) as DvdnavBindings["mouseSelect"],
+    mouseActivate: w("dvd_mouse_activate", "number", ["number", "number"]) as DvdnavBindings["mouseActivate"],
+    menuCall: w("dvd_menu_call", "number", ["number"]) as DvdnavBindings["menuCall"],
+    goUp: w("dvd_go_up", "number", []) as DvdnavBindings["goUp"],
   };
 }
 
@@ -270,10 +314,12 @@ function queryStructure(dvd: DvdnavBindings): DiscStructure {
 
 export class DvdSession {
   private dvd: DvdnavBindings;
+  private discPath: string;
   private _structure: DiscStructure | null = null;
 
-  constructor(_mod: DvdnavModule, dvd: DvdnavBindings) {
+  constructor(_mod: DvdnavModule, dvd: DvdnavBindings, discPath: string) {
     this.dvd = dvd;
+    this.discPath = discPath;
   }
 
   getNextEvent(): NavEvent {
@@ -293,6 +339,9 @@ export class DvdSession {
     if (raw.oldDomain !== undefined) ev.oldDomain = raw.oldDomain;
     if (raw.newDomain !== undefined) ev.newDomain = raw.newDomain;
     if (raw.stillLength !== undefined) ev.stillLength = raw.stillLength;
+    if (raw.display !== undefined) ev.display = raw.display;
+    if (raw.buttonN !== undefined) ev.buttonN = raw.buttonN;
+    if (raw.clut !== undefined) ev.clut = raw.clut;
     return ev;
   }
 
@@ -328,9 +377,54 @@ export class DvdSession {
     return this.dvd.isDomainVts() === 1;
   }
 
+  /* --- Menu / Button (M3) --- */
+
+  getCurrentButton(): number {
+    return this.dvd.getCurrentButton();
+  }
+
+  getButtons(): ButtonInfo[] {
+    return JSON.parse(this.dvd.getButtons());
+  }
+
+  buttonActivate(): boolean {
+    return this.dvd.buttonActivate() === 0;
+  }
+
+  buttonSelect(direction: "up" | "down" | "left" | "right"): boolean {
+    const fn = {
+      up: this.dvd.buttonSelectUp,
+      down: this.dvd.buttonSelectDown,
+      left: this.dvd.buttonSelectLeft,
+      right: this.dvd.buttonSelectRight,
+    }[direction];
+    return fn() === 0;
+  }
+
+  mouseSelect(x: number, y: number): boolean {
+    return this.dvd.mouseSelect(x, y) === 0;
+  }
+
+  mouseActivate(x: number, y: number): boolean {
+    return this.dvd.mouseActivate(x, y) === 0;
+  }
+
+  menuCall(menuId: number): boolean {
+    return this.dvd.menuCall(menuId) === 0;
+  }
+
+  goUp(): boolean {
+    return this.dvd.goUp() === 0;
+  }
+
   getDiscStructure(): DiscStructure {
     if (!this._structure) {
       this._structure = queryStructure(this.dvd);
+      // queryStructure calls titlePlay(1) to read video/audio attributes,
+      // which moves the VM away from the First Play PGC. Reopen the disc
+      // so the VM starts fresh when start() is called.
+      this.dvd.close();
+      this.dvd.open(this.discPath);
     }
     return this._structure;
   }
@@ -351,7 +445,7 @@ export async function initSession(): Promise<DvdSession> {
     throw new Error(`dvdnav_open failed: ${dvd.error()}`);
   }
 
-  return new DvdSession(mod, dvd);
+  return new DvdSession(mod, dvd, vtsPath);
 }
 
 /** One-shot convenience: load WASM, fetch IFOs, open disc, return structure */
