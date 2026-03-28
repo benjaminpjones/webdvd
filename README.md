@@ -49,9 +49,9 @@ Point webdvd at a `VIDEO_TS` folder and relive 1999 in a browser tab.
 
 **Navigation (WASM):** The canonical `libdvdnav` and `libdvdread` C libraries are compiled to WebAssembly via Emscripten. This gives us battle-tested DVD navigation — the same code that powers VLC and Kodi — running in the browser. The VM executes IFO commands, manages registers, handles PGC chains, and drives the entire disc experience. Both IFO and VOB files are loaded into Emscripten's MEMFS so the VM can read navigation packets and drive block-level playback.
 
-**Session Manager (TypeScript):** On page load, the session manager "inserts the disc" by running the First Play PGC through the WASM VM. It spins the `dvdnav_get_next_block()` event loop (discarding MPEG-2 data, processing only navigation events like CELL_CHANGE, VTS_CHANGE, STILL_FRAME, STOP) to determine what to play, then tells the server to transcode that titleset. Title and chapter selection also go through the VM. Chapter seeks within the same title are instant (client-side `video.currentTime`); title switches require a new transcode request (~1-2s for ffmpeg startup).
+**Session Manager (TypeScript):** On page load, the session manager "inserts the disc" by running the First Play PGC through the WASM VM. It spins the `dvdnav_get_next_block()` event loop (discarding MPEG-2 data, processing only navigation events like CELL_CHANGE, VTS_CHANGE, HIGHLIGHT, STILL_FRAME, HOP_CHANNEL, STOP) to determine what to play. If the disc lands in a menu, the overlay shows button highlights and waits for user input. If it lands in a title, the server is told to transcode that titleset. Button activation re-enters the event loop, using `awaitingTransition` tracking to skip stale menu cells until the VM completes the jump. Chapter seeks use sector-based offsets for fast startup; title switches require a new transcode request (~1-2s for ffmpeg startup).
 
-**Menus (Canvas):** DVD subpicture overlays (RLE-encoded bitmaps) are decoded and rendered on a `<canvas>` layer over the video. Button highlights, click regions, and arrow-key navigation are driven by PCI packets parsed by libdvdnav. *(Not yet implemented — see M3 milestone.)*
+**Menus (Canvas):** Button highlights are rendered on a `<canvas>` layer over the video. Click regions and arrow-key navigation are driven by PCI packets parsed by libdvdnav. Button activation triggers VM commands that navigate between menus and titles. An on-screen DVD remote provides arrow keys, OK, and Menu buttons for navigation. Full subpicture RLE decoding (for rendered menu text/graphics) is planned for a future milestone — currently menus use rectangle highlights only.
 
 ## Tech Stack
 
@@ -70,7 +70,7 @@ Point webdvd at a `VIDEO_TS` folder and relive 1999 in a browser tab.
 - [Node.js](https://nodejs.org/) >= 18 (for the player)
 - [ffmpeg](https://ffmpeg.org/) (for video transcoding)
 - [Emscripten](https://emscripten.org/docs/getting_started/downloads.html) (for building the WASM module)
-- [dvdauthor](http://dvdauthor.sourceforge.net/) (optional, for generating the test disc)
+- [dvdauthor](http://dvdauthor.sourceforge.net/) (for generating the test disc — includes `spumux` for menu button highlights)
 
 ## Quick Start
 
@@ -91,7 +91,7 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173 to watch your DVD. The disc auto-plays via the First Play PGC.
+Open http://localhost:5173 to watch your DVD. The test disc starts at the root menu — click a button or use the on-screen DVD remote to navigate.
 
 To use a real DVD, point the server at its `VIDEO_TS` directory instead of the test disc.
 
@@ -103,7 +103,7 @@ To use a real DVD, point the server at its `VIDEO_TS` directory instead of the t
 node wasm/test.mjs
 
 # E2E browser test — headless Chromium via Playwright
-# Starts both servers automatically, verifies VM-driven auto-play
+# Starts both servers automatically, verifies menu navigation + playback
 cd player
 npx playwright install chromium  # first time only
 npm test
@@ -115,7 +115,9 @@ npm test
 cd player && npm test
 ```
 
-This catches regressions in the WASM glue, VM navigation, server transcoding, and video playback. The test verifies the video is actually playing (not paused, no errors, has real duration) — not just that a URL was set.
+This catches regressions in the WASM glue, VM navigation, menu interaction, server transcoding, and video playback. The e2e suite covers disc structure, menu loading, button highlights, sub-menu navigation, title playback from menus, and title switching.
+
+The test disc includes a VMGM root menu (3 buttons: Title 1, Title 2, Chapters) and a VTS chapters sub-menu (3 buttons: Chapter 1, Chapter 2, Main Menu), exercising the full menu↔title flow.
 
 CI runs the WASM smoke test on every push/PR via GitHub Actions. The smoke test covers VM navigation (the event loop reaches a CELL_CHANGE in VTS domain) but does not test the full browser playback pipeline — that's what the local e2e test is for.
 
@@ -137,7 +139,8 @@ wasm/
   src/config.h       Emscripten build config
   build.sh           Compiles C sources → dvdnav.js + dvdnav.wasm
   test.mjs           Node.js smoke test (IFO parsing + VM event loop)
-scripts/             Dev utilities (test disc generation)
+  src/overlay.ts     Menu button highlight renderer (canvas overlay + DVD remote)
+scripts/             Dev utilities (test disc generation with menus via dvdauthor + spumux)
 ```
 
 ## Key Design Details
@@ -152,7 +155,15 @@ The WASM VM needs **both IFO and VOB files** in Emscripten's MEMFS to function. 
 
 ### First Play PGC handling
 
-When a DVD is "inserted" (page load), the VM starts at the First Play PGC. Simple discs jump straight to the main title. Commercial discs typically jump to a menu. Since menu rendering is M3, the session manager falls back to `titlePlay(1)` if it detects a menu loop (3+ infinite still frames).
+When a DVD is "inserted" (page load), the VM starts at the First Play PGC. Simple discs jump straight to the main title. Commercial discs typically jump to a menu, where the session manager shows button highlights and waits for user input.
+
+### Post-activation transition tracking
+
+After a button is activated, the VM re-enters its event loop. The first few events are stale (still referencing the old menu's PCI/cell data). The `awaitingTransition` flag blocks menu detection until HOP_CHANNEL or VTS_CHANGE fires, confirming the VM has completed its jump. `menuCellsSinceHop` provides similar protection after domain hops — the first menu cell after a HOP has stale PCI, so button detection waits for the second cell.
+
+### Sector-based seeking
+
+Chapter and menu cell playback use VOB-absolute sector offsets from the IFO cell_playback table rather than time-based seeking. The server finds which VOB file contains the start sector, seeks to the byte offset, and reads across VOB file boundaries as needed. For menu cells that share a VOB with other cells, `lastSector` limits the read range to prevent bleeding into adjacent cells.
 
 ### Latency
 
@@ -181,11 +192,13 @@ When a DVD is "inserted" (page load), the VM starts at the First Play PGC. Simpl
 - [x] Streaming transcode (fMP4 fragments, not buffered)
 
 ### M3: Menus
-- [ ] Subpicture stream parsing and RLE decoding
-- [ ] Button highlight rendering on canvas overlay
-- [ ] PCI packet parsing for button coordinates and commands
-- [ ] Click/keyboard → button activation → VM command → navigation
-- [ ] Full menu → movie → menu flow
+- [x] Button highlight rendering on canvas overlay
+- [x] PCI packet parsing for button coordinates and commands
+- [x] Click/keyboard → button activation → VM command → navigation
+- [x] Full menu → movie → menu flow
+- [x] On-screen DVD remote (arrows, OK, Menu)
+- [ ] Subpicture stream parsing and RLE decoding (currently rectangle highlights only)
+- [ ] On-demand VOB block reading (fetch blocks as VM requests them instead of loading entire menu VOBs into MEMFS — needed for fast startup from optical/network drives)
 
 ### M4: Full Experience
 - [ ] Subtitle rendering during playback

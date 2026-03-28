@@ -75,6 +75,7 @@ interface DvdnavBindings {
   mouseActivate: (x: number, y: number) => number;
   menuCall: (menuId: number) => number;
   goUp: () => number;
+  getLastVobuPtm: () => number;
 }
 
 /* --- Public types --- */
@@ -85,7 +86,9 @@ export interface NavEvent {
   cellN?: number;
   pgN?: number;
   pgcLengthMs?: number;
-  cellStartMs?: number;
+  cellStartSectors?: number;
+  firstSector?: number;  // VOB-absolute first sector of the cell
+  lastSector?: number;   // VOB-absolute last sector of the cell
   title?: number;
   part?: number;
   isVts?: boolean;
@@ -96,6 +99,8 @@ export interface NavEvent {
   newDomain?: number;
   /* STILL_FRAME fields */
   stillLength?: number;
+  /* NAV_PACKET fields */
+  vobuStartPtm?: number;
   /* HIGHLIGHT fields */
   display?: number;
   buttonN?: number;
@@ -124,6 +129,8 @@ export interface TitleInfo {
   angles: number;
   durationMs: number;
   chapterTimesMs: number[];
+  vts: number;       // VTS (titleset) number this title belongs to
+  vtsTtn: number;    // title number within the VTS
 }
 
 export interface AudioStream {
@@ -219,6 +226,7 @@ function bindFunctions(mod: DvdnavModule): DvdnavBindings {
     mouseActivate: w("dvd_mouse_activate", "number", ["number", "number"]) as DvdnavBindings["mouseActivate"],
     menuCall: w("dvd_menu_call", "number", ["number"]) as DvdnavBindings["menuCall"],
     goUp: w("dvd_go_up", "number", []) as DvdnavBindings["goUp"],
+    getLastVobuPtm: w("dvd_get_last_vobu_ptm", "number", []) as DvdnavBindings["getLastVobuPtm"],
   };
 }
 
@@ -243,9 +251,16 @@ async function loadDiscFiles(mod: DvdnavModule): Promise<string> {
   if (!vobRes.ok) throw new Error(`Failed to fetch VOB list: ${vobRes.statusText}`);
 
   const ifoFiles: string[] = await ifoRes.json();
-  const vobFiles: string[] = await vobRes.json();
+  const allVobs: string[] = await vobRes.json();
 
-  // Fetch all files into MEMFS in parallel
+  // Only load menu VOBs into MEMFS — VIDEO_TS.VOB and VTS_NN_0.VOB.
+  // Title VOBs (VTS_NN_1+.VOB) are multi-GB and not needed: the VM
+  // produces navigation events (CELL_CHANGE, VTS_CHANGE) from IFO data
+  // before reading title VOB blocks, and the server handles transcoding.
+  const vobFiles = allVobs.filter(
+    (name) => name.startsWith("VIDEO_TS") || name.match(/^VTS_\d+_0\.VOB$/),
+  );
+
   const fetchFile = async (name: string, endpoint: string) => {
     const resp = await fetch(`${API_BASE}/api/${endpoint}/${name}`);
     if (!resp.ok) throw new Error(`Failed to fetch ${name}: ${resp.statusText}`);
@@ -257,6 +272,36 @@ async function loadDiscFiles(mod: DvdnavModule): Promise<string> {
     ...ifoFiles.map((name) => fetchFile(name, "ifo")),
     ...vobFiles.map((name) => fetchFile(name, "vob")),
   ]);
+
+  // Create empty placeholder VOBs for any titleset that has IFOs but no
+  // menu VOB. libdvdread needs these files to exist (even if 0-byte) or
+  // DVDOpenFile fails when the VM transitions through that domain.
+  const ifoSet = new Set(ifoFiles);
+  const vobSet = new Set(vobFiles);
+  // VMGM: VIDEO_TS.VOB
+  if (ifoSet.has("VIDEO_TS.IFO") && !vobSet.has("VIDEO_TS.VOB")) {
+    mod.FS.writeFile(`${vtsPath}/VIDEO_TS.VOB`, new Uint8Array(0));
+    console.log("[dvdnav] Created empty VIDEO_TS.VOB placeholder");
+  }
+  // VTS menus: VTS_NN_0.VOB
+  // VTS titles: VTS_NN_1.VOB (libdvdnav opens title VOBs during VTS init,
+  // even when navigating to the menu domain; without a placeholder file
+  // the open fails and menu navigation breaks)
+  for (const ifo of ifoFiles) {
+    const m = ifo.match(/^(VTS_\d+)_0\.IFO$/);
+    if (m) {
+      const menuVob = `${m[1]}_0.VOB`;
+      if (!vobSet.has(menuVob)) {
+        mod.FS.writeFile(`${vtsPath}/${menuVob}`, new Uint8Array(0));
+        console.log(`[dvdnav] Created empty ${menuVob} placeholder`);
+      }
+      const titleVob = `${m[1]}_1.VOB`;
+      if (!vobSet.has(titleVob)) {
+        mod.FS.writeFile(`${vtsPath}/${titleVob}`, new Uint8Array(0));
+        console.log(`[dvdnav] Created empty ${titleVob} placeholder`);
+      }
+    }
+  }
 
   console.log(
     `[dvdnav] Loaded ${ifoFiles.length} IFO/BUP + ${vobFiles.length} VOB files into MEMFS`,
@@ -278,6 +323,8 @@ function queryStructure(dvd: DvdnavBindings): DiscStructure {
       angles: dvd.getNumAngles(t),
       durationMs: info.duration_ms,
       chapterTimesMs: info.chapter_times_ms,
+      vts: info.vts,
+      vtsTtn: info.vts_ttn,
     });
   }
 
@@ -316,7 +363,6 @@ export class DvdSession {
   private dvd: DvdnavBindings;
   private discPath: string;
   private _structure: DiscStructure | null = null;
-
   constructor(_mod: DvdnavModule, dvd: DvdnavBindings, discPath: string) {
     this.dvd = dvd;
     this.discPath = discPath;
@@ -330,7 +376,9 @@ export class DvdSession {
     if (raw.cellN !== undefined) ev.cellN = raw.cellN;
     if (raw.pgN !== undefined) ev.pgN = raw.pgN;
     if (raw.pgcLengthMs !== undefined) ev.pgcLengthMs = raw.pgcLengthMs;
-    if (raw.cellStartMs !== undefined) ev.cellStartMs = raw.cellStartMs;
+    if (raw.cellStartSectors !== undefined) ev.cellStartSectors = raw.cellStartSectors;
+    if (raw.firstSector !== undefined) ev.firstSector = raw.firstSector;
+    if (raw.lastSector !== undefined) ev.lastSector = raw.lastSector;
     if (raw.title !== undefined) ev.title = raw.title;
     if (raw.part !== undefined) ev.part = raw.part;
     if (raw.isVts !== undefined) ev.isVts = !!raw.isVts;
@@ -339,6 +387,7 @@ export class DvdSession {
     if (raw.oldDomain !== undefined) ev.oldDomain = raw.oldDomain;
     if (raw.newDomain !== undefined) ev.newDomain = raw.newDomain;
     if (raw.stillLength !== undefined) ev.stillLength = raw.stillLength;
+    if (raw.vobuStartPtm !== undefined) ev.vobuStartPtm = raw.vobuStartPtm;
     if (raw.display !== undefined) ev.display = raw.display;
     if (raw.buttonN !== undefined) ev.buttonN = raw.buttonN;
     if (raw.clut !== undefined) ev.clut = raw.clut;
@@ -359,6 +408,10 @@ export class DvdSession {
 
   stillSkip(): void {
     this.dvd.stillSkip();
+  }
+
+  waitSkip(): void {
+    this.dvd.waitSkip();
   }
 
   getCurrentTitle(): number {
@@ -417,6 +470,11 @@ export class DvdSession {
     return this.dvd.goUp() === 0;
   }
 
+  /** Last NAV packet's VOBU start PTS (90kHz clock, VOB-absolute) */
+  getLastVobuPtm(): number {
+    return this.dvd.getLastVobuPtm();
+  }
+
   getDiscStructure(): DiscStructure {
     if (!this._structure) {
       this._structure = queryStructure(this.dvd);
@@ -427,6 +485,12 @@ export class DvdSession {
       this.dvd.open(this.discPath);
     }
     return this._structure;
+  }
+
+  /** Reset the VM to First Play PGC state (close + reopen) */
+  reset(): void {
+    this.dvd.close();
+    this.dvd.open(this.discPath);
   }
 
   close(): void {

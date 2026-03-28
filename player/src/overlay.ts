@@ -35,15 +35,15 @@ export class MenuOverlay {
       const h = btn.y1 - btn.y0;
 
       if (isCurrent) {
-        // Selected button: bright highlight
-        ctx.fillStyle = "rgba(255, 255, 255, 0.35)";
+        // Selected button: neutral white highlight
+        ctx.fillStyle = "rgba(255, 255, 255, 0.3)";
         ctx.fillRect(x, y, w, h);
         ctx.strokeStyle = "rgba(255, 255, 255, 0.8)";
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 3;
         ctx.strokeRect(x, y, w, h);
       } else {
         // Other buttons: subtle outline
-        ctx.strokeStyle = "rgba(255, 255, 255, 0.2)";
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.25)";
         ctx.lineWidth = 1;
         ctx.strokeRect(x, y, w, h);
       }

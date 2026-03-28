@@ -1,8 +1,18 @@
 import { test, expect } from "@playwright/test";
 
+/**
+ * Helper: wait for the status element to settle on "Menu".
+ * The session manager sets state → "menu" which triggers onStateChange.
+ */
+async function waitForMenu(page: import("@playwright/test").Page) {
+  await page.waitForFunction(
+    () => document.getElementById("status")?.textContent === "Menu",
+    { timeout: 30_000 },
+  );
+}
+
 test.describe("DVD disc structure via WASM", () => {
   test("displays disc structure from libdvdnav", async ({ page }) => {
-    // Collect console errors
     const errors: string[] = [];
     page.on("console", (msg) => {
       if (msg.type() === "error") errors.push(msg.text());
@@ -10,33 +20,27 @@ test.describe("DVD disc structure via WASM", () => {
 
     await page.goto("/");
 
-    // Wait for the WASM-derived disc structure to appear
     const discStructure = page.locator("#disc-structure");
     await expect(discStructure).not.toHaveText("Loading disc structure (WASM)...", {
       timeout: 15_000,
     });
 
-    // Should not show an error
     const text = await discStructure.textContent();
     expect(text).not.toContain("WASM: Error");
 
-    // Should contain video resolution info
     await expect(discStructure).toContainText("720x480");
-
-    // Should contain aspect ratio
     await expect(discStructure).toContainText("4:3");
 
-    // Should contain all 3 titles
+    // All 3 titles detected
     await expect(discStructure).toContainText("Title 1:");
     await expect(discStructure).toContainText("Title 2:");
     await expect(discStructure).toContainText("Title 3:");
 
-    // Title 1: 2 chapters, ~8s
+    // Chapter counts
     await expect(discStructure).toContainText("2 chapter(s)");
-    // Title 2: 3 chapters, ~10s
     await expect(discStructure).toContainText("3 chapter(s)");
 
-    // No JS errors related to WASM (exclude known harmless libdvdnav warnings)
+    // No unexpected WASM errors
     const knownWarnings = [
       "Couldn't find device name",
       "Can't read name block",
@@ -59,69 +63,120 @@ test.describe("DVD disc structure via WASM", () => {
       timeout: 15_000,
     });
 
-    // Should show 3 titles
     await expect(discInfo).toContainText("3 title(s)");
   });
 
   test("title buttons are rendered", async ({ page }) => {
     await page.goto("/");
 
-    // Wait for title buttons to appear
     const btn = page.locator(".title-btn").first();
     await expect(btn).toBeVisible({ timeout: 15_000 });
     await expect(btn).toContainText("Title 1");
   });
+});
 
-  test("VM-driven auto-play starts video", async ({ page }) => {
+test.describe("DVD menu navigation", () => {
+  test("First Play lands in root menu with buttons", async ({ page }) => {
+    const logs: string[] = [];
+    page.on("console", (msg) => logs.push(msg.text()));
+
     await page.goto("/");
+    await waitForMenu(page);
 
-    // Wait for status to show playing
+    // Root menu should have 3 buttons
+    const menuLogs = logs.filter((l) => l.includes("[session] Menu"));
+    expect(menuLogs.some((l) => l.includes("3 buttons"))).toBe(true);
+  });
+
+  test("menu button plays title", async ({ page }) => {
+    await page.goto("/");
+    await waitForMenu(page);
+
     const status = page.locator("#status");
+
+    // Press Enter on default button (should play a title)
+    await page.keyboard.press("Enter");
+
     await expect(status).toContainText("Playing", { timeout: 30_000 });
 
-    // Video element should have a src set
     const video = page.locator("#video");
     const src = await video.getAttribute("src");
     expect(src).toContain("/api/transcode/");
-
-    // Video should actually be playing (not stalled/errored)
-    const state = await video.evaluate((v: HTMLVideoElement) => ({
-      paused: v.paused,
-      readyState: v.readyState,
-      error: v.error?.message ?? null,
-      currentTime: v.currentTime,
-      duration: v.duration,
-    }));
-    expect(state.error).toBeNull();
-    expect(state.paused).toBe(false);
-    expect(state.readyState).toBeGreaterThanOrEqual(2); // HAVE_CURRENT_DATA
-    expect(state.duration).toBeGreaterThan(0);
   });
 
-  test("title switching changes video source and plays", async ({ page }) => {
+  test("sub-menu navigation and return to main", async ({ page }) => {
+    const logs: string[] = [];
+    page.on("console", (msg) => logs.push(msg.text()));
+
     await page.goto("/");
+    await waitForMenu(page);
+
+    // Navigate to "Chapters" button (button 3 — down twice from button 1)
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+
+    // Should land in the chapters sub-menu (still in "Menu" state)
+    await waitForMenu(page);
+
+    // The sub-menu should also have 3 buttons
+    const menuLogs = logs.filter((l) =>
+      l.includes("[session] Menu detected") ||
+      l.includes("[session] Menu via"),
+    );
+    // Should have at least 2 menu detections (root + sub-menu)
+    expect(menuLogs.length).toBeGreaterThanOrEqual(2);
+
+    // Navigate to "Main Menu" button (button 3) and press Enter
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+
+    // Should return to root menu
+    await waitForMenu(page);
+  });
+
+  test("sub-menu button plays title", async ({ page }) => {
+    const logs: string[] = [];
+    page.on("console", (msg) => logs.push(msg.text()));
+
+    await page.goto("/");
+    await waitForMenu(page);
+
+    // Navigate to "Chapters" sub-menu
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+
+    await waitForMenu(page);
+
+    // Press Enter on "Chapter 1" button (button 1, already selected)
+    await page.keyboard.press("Enter");
 
     const status = page.locator("#status");
-    const video = page.locator("#video");
-
-    // Wait for auto-play to start (First Play PGC → title 2)
     await expect(status).toContainText("Playing", { timeout: 30_000 });
-    const autoSrc = await video.getAttribute("src");
-    expect(autoSrc).toContain("/api/transcode/");
 
-    // Click a different title — pick one that isn't currently playing
-    // First Play PGC targets title 2, so click title 3 to guarantee a switch
+    const video = page.locator("#video");
+    const src = await video.getAttribute("src");
+    expect(src).toContain("/api/transcode/");
+  });
+
+  test("title switching from menu changes video source", async ({ page }) => {
+    await page.goto("/");
+    await waitForMenu(page);
+
+    const status = page.locator("#status");
+
+    // Click Title 3 button directly (bypasses menu)
     const title3Btn = page.locator(".title-btn[data-title='3']");
     await title3Btn.click();
 
-    // Wait for the new title to start playing
     await expect(status).toContainText("Playing title 3", { timeout: 30_000 });
 
-    // Verify video source changed to a different VTS
-    const newSrc = await video.getAttribute("src");
-    expect(newSrc).not.toBe(autoSrc);
+    const video = page.locator("#video");
+    const src = await video.getAttribute("src");
+    expect(src).toContain("/api/transcode/3");
 
-    // Verify video is actually playing (not stalled/errored)
     const state = await video.evaluate((v: HTMLVideoElement) => ({
       paused: v.paused,
       readyState: v.readyState,

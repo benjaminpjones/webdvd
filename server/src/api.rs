@@ -78,15 +78,19 @@ async fn vob_file(
 }
 
 #[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct TranscodeParams {
     ss: Option<f64>,
     t: Option<f64>,
+    sector: Option<u64>,
+    last_sector: Option<u64>,
 }
 
 /// Transcode a menu VOB (titleset=0 for VMGM, N for VTS_N menu).
 async fn transcode_menu(
     State(state): State<AppState>,
     Path(titleset): Path<u32>,
+    Query(params): Query<TranscodeParams>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let vobs = state.disc.menu_vobs(titleset);
     if vobs.is_empty() {
@@ -96,7 +100,14 @@ async fn transcode_menu(
         ));
     }
 
-    let body = transcode::transcode_to_stream(&vobs, &Default::default())
+    let opts = transcode::TranscodeOpts {
+        start_secs: params.ss,
+        duration_secs: params.t,
+        sector: params.sector,
+        last_sector: params.last_sector,
+    };
+
+    let body = transcode::transcode_to_stream(&vobs, &opts)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -122,6 +133,8 @@ async fn transcode_titleset(
     let opts = transcode::TranscodeOpts {
         start_secs: params.ss,
         duration_secs: params.t,
+        sector: params.sector,
+        last_sector: params.last_sector,
     };
 
     let body = transcode::transcode_to_stream(&vobs, &opts)

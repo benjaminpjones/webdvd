@@ -12,11 +12,32 @@
 #include <dvdread/ifo_read.h>
 #include <dvdread/ifo_types.h>
 #include <dvdread/nav_types.h>
+/* Internal header — needed to access position_current.cell_start
+ * (VOB-absolute sector of the current cell) */
+#include "vm/decoder.h"
+#include "vm/vm.h"
+#include "dvdnav_internal.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 
 static dvdnav_t *nav = NULL;
+static char dvd_path[256] = {0};  /* stash disc path for IFO reads */
+
+/* Pending menu cell info — when CELL_CHANGE fires in menu domain,
+ * we stash it and continue looping to find the NAV_PACKET with buttons
+ * (PCI isn't populated until a NAV pack is read). */
+static int pending_menu_cell = 0;
+static int pending_cell_n = 0;
+static int pending_pg_n = 0;
+static int pending_title = 0;
+static int pending_part = 0;
+static long long pending_pgc_length_ms = 0;
+static long long pending_cell_start_ms = 0;
+
+/* Last NAV packet's VOBU start PTS (90kHz clock, VOB-absolute).
+ * Used by JS to compute seek time into the menu VOB. */
+static uint32_t last_vobu_start_ptm = 0;
 
 /* --- Lifecycle --- */
 
@@ -24,6 +45,7 @@ EMSCRIPTEN_KEEPALIVE
 int dvd_open(const char *path) {
     if (nav) dvdnav_close(nav);
     nav = NULL;
+    snprintf(dvd_path, sizeof(dvd_path), "%s", path);
     dvdnav_status_t status = dvdnav_open(&nav, path);
     if (status != DVDNAV_STATUS_OK) {
         nav = NULL;
@@ -236,13 +258,21 @@ const char* dvd_get_next_event(void) {
     int32_t event = 0;
     int32_t len = 0;
     int iterations = 0;
-    const int MAX_ITER = 50000;
+    const int MAX_ITER = 500000;
+    double start_time = emscripten_get_now();
 
     while (iterations++ < MAX_ITER) {
+        /* Time-based bailout — don't block JS thread for more than 100ms */
+        if (iterations % 2000 == 0 &&
+            emscripten_get_now() - start_time > 100.0) {
+            break;
+        }
+
         dvdnav_status_t status = dvdnav_get_next_block(nav,
             (uint8_t*)event_buf, &event, &len);
 
         if (status != DVDNAV_STATUS_OK) {
+            pending_menu_cell = 0;
             snprintf(json_buf, sizeof(json_buf),
                 "{\"event\":-1,\"error\":\"%s\"}", dvdnav_err_to_string(nav));
             return json_buf;
@@ -250,10 +280,21 @@ const char* dvd_get_next_event(void) {
 
         switch (event) {
         case DVDNAV_BLOCK_OK:
-        case DVDNAV_NAV_PACKET:
         case DVDNAV_NOP:
             /* Skip — discard MPEG-2 data, continue spinning */
             continue;
+
+        case DVDNAV_NAV_PACKET: {
+            /* NAV packs populate PCI (button data for menus) as a
+             * side effect of dvdnav_get_next_block(). We skip the event
+             * itself — menu detection happens via STILL_FRAME/HIGHLIGHT
+             * which fire after PCI is populated. */
+            pci_t *nav_pci = dvdnav_get_current_nav_pci(nav);
+            if (nav_pci) {
+                last_vobu_start_ptm = nav_pci->pci_gi.vobu_s_ptm;
+            }
+            continue;
+        }
 
         case DVDNAV_CELL_CHANGE: {
             dvdnav_cell_change_event_t *cell =
@@ -261,13 +302,28 @@ const char* dvd_get_next_event(void) {
             int32_t title = 0, part = 0;
             dvdnav_current_title_info(nav, &title, &part);
             int is_vts = dvdnav_is_domain_vts(nav) ? 1 : 0;
+
+            /* Get VOB-absolute first sector of this cell from the PGC
+             * cell playback table. cell_start in the event struct is
+             * PGC-relative (sum of preceding cells' sectors). */
+            dvd_state_t *state = &nav->vm->state;
+            uint32_t first_sector = 0;
+            uint32_t last_sector = 0;
+            if (state->pgc && cell->cellN > 0 &&
+                cell->cellN <= state->pgc->nr_of_cells) {
+                first_sector = state->pgc->cell_playback[cell->cellN - 1].first_sector;
+                last_sector = state->pgc->cell_playback[cell->cellN - 1].last_sector;
+            }
+
             snprintf(json_buf, sizeof(json_buf),
                 "{\"event\":6,\"cellN\":%d,\"pgN\":%d,"
-                "\"pgcLengthMs\":%lld,\"cellStartMs\":%lld,"
+                "\"pgcLengthMs\":%lld,\"cellStartSectors\":%lld,"
+                "\"firstSector\":%u,\"lastSector\":%u,"
                 "\"title\":%d,\"part\":%d,\"isVts\":%d}",
                 cell->cellN, cell->pgN,
                 (long long)(cell->pgc_length / 90),
-                (long long)(cell->cell_start / 90),
+                (long long)(cell->cell_start),
+                (unsigned)first_sector, (unsigned)last_sector,
                 (int)title, (int)part, is_vts);
             return json_buf;
         }
@@ -357,8 +413,14 @@ const char* dvd_get_next_event(void) {
         }
     }
 
-    /* Safety valve — yielded after MAX_ITER without an interesting event */
+    /* Safety valve — yielded after MAX_ITER or time limit without an interesting event */
+    pending_menu_cell = 0;
     return "{\"event\":-2,\"error\":\"iteration limit\"}";
+}
+
+EMSCRIPTEN_KEEPALIVE
+unsigned dvd_get_last_vobu_ptm(void) {
+    return last_vobu_start_ptm;
 }
 
 /* --- Menu / Button Interaction (M3) --- */
@@ -481,10 +543,30 @@ const char* dvd_describe_title(int title) {
     uint64_t duration = 0;
     uint32_t n = dvdnav_describe_title_chapters(nav, title, &times, &duration);
 
+    /* Get VTS number from the VMGM title table (tt_srpt).
+     * We open the VMGM IFO directly via libdvdread to avoid
+     * depending on internal libdvdnav headers. */
+    int vts = 0;
+    int vts_ttn = 0;
+    if (dvd_path[0]) {
+        dvd_reader_t *reader = DVDOpen(dvd_path);
+        if (reader) {
+            ifo_handle_t *vmgi = ifoOpen(reader, 0);
+            if (vmgi && vmgi->tt_srpt && title >= 1 &&
+                title <= (int)vmgi->tt_srpt->nr_of_srpts) {
+                vts = vmgi->tt_srpt->title[title - 1].title_set_nr;
+                vts_ttn = vmgi->tt_srpt->title[title - 1].vts_ttn;
+            }
+            if (vmgi) ifoClose(vmgi);
+            DVDClose(reader);
+        }
+    }
+
     int pos = 0;
     pos += snprintf(json_buf + pos, sizeof(json_buf) - pos,
-        "{\"chapters\":%u,\"duration_ms\":%llu,\"chapter_times_ms\":[",
-        (unsigned)n, (unsigned long long)(duration / 90));
+        "{\"chapters\":%u,\"duration_ms\":%llu,\"vts\":%d,\"vts_ttn\":%d,"
+        "\"chapter_times_ms\":[",
+        (unsigned)n, (unsigned long long)(duration / 90), vts, vts_ttn);
 
     for (uint32_t i = 0; i < n && pos < (int)sizeof(json_buf) - 32; i++) {
         if (i > 0) json_buf[pos++] = ',';
