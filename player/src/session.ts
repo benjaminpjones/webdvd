@@ -445,7 +445,8 @@ export class SessionManager {
           continue;
 
         case DVDNAV_VTS_CHANGE:
-          this.currentVts = ev.newVtsN ?? 0;
+          // libdvdnav uses -1 for VMGM (no titleset); we use 0
+          this.currentVts = (ev.newVtsN ?? 0) < 0 ? 0 : ev.newVtsN!;
           this.log(
             `VTS change: ${ev.oldVtsN} → ${ev.newVtsN} (domain ${ev.oldDomain} → ${ev.newDomain})`,
           );
