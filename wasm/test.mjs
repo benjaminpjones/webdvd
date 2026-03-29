@@ -159,14 +159,10 @@ async function main() {
   // Drive events until we see a menu (NAV_PACKET with buttons) or a title cell.
   const getButtons = Module.cwrap("dvd_get_buttons", "string", []);
   let foundMenu = false;
-  let sawVtsChange = false;
   for (let i = 0; i < 20; i++) {
     const json = getNextEvent();
     const ev = JSON.parse(json);
 
-    if (ev.event === 5) { // VTS_CHANGE
-      sawVtsChange = true;
-    }
     // After any event, check if PCI has been populated with buttons
     if (!foundMenu) {
       const btns = JSON.parse(getButtons());
@@ -188,7 +184,6 @@ async function main() {
     }
   }
 
-  assert(sawVtsChange || foundMenu, "saw VTS_CHANGE or menu during navigation");
   assert(foundMenu, "First Play PGC navigated to root menu with buttons");
 
   // Cleanup
