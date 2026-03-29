@@ -4,7 +4,7 @@ export default defineConfig({
   testDir: "./e2e",
   timeout: 30_000,
   use: {
-    baseURL: "http://localhost:5173",
+    baseURL: "http://localhost:5188",
     headless: true,
   },
   projects: [
@@ -19,8 +19,8 @@ export default defineConfig({
       timeout: 30_000,
     },
     {
-      command: "npx vite --port 5173",
-      port: 5173,
+      command: "npx vite --port 5188",
+      port: 5188,
       reuseExistingServer: true,
       timeout: 10_000,
     },

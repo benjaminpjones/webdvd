@@ -22,8 +22,6 @@ import {
   type ButtonInfo,
 } from "./dvdnav";
 
-const API_BASE = "http://localhost:3000";
-
 export interface PlaybackTarget {
   vts: number;
   title: number;
@@ -307,7 +305,7 @@ export class SessionManager {
    * position so sub-menus (e.g. Scene Selection) show the correct video.
    */
   private loadMenuVideo(): void {
-    let url = `${API_BASE}/api/transcode-menu/${this.currentVts}`;
+    let url = `/api/transcode-menu/${this.currentVts}`;
     const params = new URLSearchParams();
     if (this.menuFirstSector > 0) {
       params.set("sector", String(this.menuFirstSector));
@@ -564,7 +562,7 @@ export class SessionManager {
     this.log(`Playing VTS ${vts} (title ${target.title}, chapter ${target.part}, sector=${target.sector ?? 0})`);
     this.setState("loading");
 
-    let url = `${API_BASE}/api/transcode/${vts}`;
+    let url = `/api/transcode/${vts}`;
     if (target.sector && target.sector > 0) {
       url += `?sector=${target.sector}`;
     }

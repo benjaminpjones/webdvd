@@ -5,8 +5,6 @@
  * and openDisc() for one-shot structure queries (backward compat).
  */
 
-const API_BASE = "http://localhost:3000";
-
 /* --- Event constants (match dvdnav_events.h) --- */
 
 export const DVDNAV_BLOCK_OK = 0;
@@ -244,8 +242,8 @@ async function loadDiscFiles(mod: DvdnavModule): Promise<string> {
 
   // Fetch IFO/BUP and VOB file lists in parallel
   const [ifoRes, vobRes] = await Promise.all([
-    fetch(`${API_BASE}/api/ifo-list`),
-    fetch(`${API_BASE}/api/vob-list`),
+    fetch(`/api/ifo-list`),
+    fetch(`/api/vob-list`),
   ]);
   if (!ifoRes.ok) throw new Error(`Failed to fetch IFO list: ${ifoRes.statusText}`);
   if (!vobRes.ok) throw new Error(`Failed to fetch VOB list: ${vobRes.statusText}`);
@@ -262,7 +260,7 @@ async function loadDiscFiles(mod: DvdnavModule): Promise<string> {
   );
 
   const fetchFile = async (name: string, endpoint: string) => {
-    const resp = await fetch(`${API_BASE}/api/${endpoint}/${name}`);
+    const resp = await fetch(`/api/${endpoint}/${name}`);
     if (!resp.ok) throw new Error(`Failed to fetch ${name}: ${resp.statusText}`);
     const buf = new Uint8Array(await resp.arrayBuffer());
     mod.FS.writeFile(`${vtsPath}/${name}`, buf);
