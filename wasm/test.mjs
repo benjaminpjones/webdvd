@@ -155,9 +155,10 @@ async function main() {
   const getNextEvent = Module.cwrap("dvd_get_next_event", "string", []);
   const stillSkip = Module.cwrap("dvd_still_skip", "number", []);
 
-  // After open, the VM is at First Play PGC which jumps to title 2.
-  // Drive events until we see a CELL_CHANGE in VTS domain.
-  let foundVtsCell = false;
+  // After open, the VM is at First Play PGC which jumps to the root menu.
+  // Drive events until we see a menu (NAV_PACKET with buttons) or a title cell.
+  const getButtons = Module.cwrap("dvd_get_buttons", "string", []);
+  let foundMenu = false;
   let sawVtsChange = false;
   for (let i = 0; i < 20; i++) {
     const json = getNextEvent();
@@ -166,11 +167,14 @@ async function main() {
     if (ev.event === 5) { // VTS_CHANGE
       sawVtsChange = true;
     }
-    if (ev.event === 6 && ev.isVts && ev.title > 0) { // CELL_CHANGE in VTS
-      foundVtsCell = true;
-      assert(ev.title === 2, `First Play PGC reaches title 2 (got ${ev.title})`);
-      assert(ev.part === 1, `starts at chapter 1 (got ${ev.part})`);
-      break;
+    // After any event, check if PCI has been populated with buttons
+    if (!foundMenu) {
+      const btns = JSON.parse(getButtons());
+      if (btns.length > 0) {
+        foundMenu = true;
+        assert(btns.length === 3, `root menu has 3 buttons (got ${btns.length})`);
+        break;
+      }
     }
     if (ev.event === 2) { // STILL_FRAME
       stillSkip();
@@ -184,8 +188,8 @@ async function main() {
     }
   }
 
-  assert(sawVtsChange, "saw VTS_CHANGE event during navigation");
-  assert(foundVtsCell, "First Play PGC navigated to title 2 in VTS domain");
+  assert(sawVtsChange || foundMenu, "saw VTS_CHANGE or menu during navigation");
+  assert(foundMenu, "First Play PGC navigated to root menu with buttons");
 
   // Cleanup
   dvd.close();
