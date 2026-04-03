@@ -125,12 +125,13 @@ CI runs the WASM smoke test on every push/PR via GitHub Actions. The smoke test 
 
 ```
 server/              Rust server (axum) — VIDEO_TS serving + streaming ffmpeg transcode
-  src/api.rs         HTTP endpoints (/api/disc, /api/transcode, /api/ifo/*, /api/vob/*)
+  src/api.rs         HTTP endpoints (/api/disc, /api/transcode, /api/ifo/*, /api/vob/*, /api/vob-range/*)
   src/transcode.rs   ffmpeg spawn + streaming fMP4 output
   src/disc.rs        VIDEO_TS directory scanner
 player/              TypeScript + Vite browser app
   src/main.ts        App entry point — auto-play via SessionManager
-  src/dvdnav.ts      WASM module wrapper — DvdSession class
+  src/dvdnav.ts      WASM module wrapper — DvdSession class, per-PGC VOB loading
+  src/ifo-parser.ts  IFO binary parser — extracts menu PGC cell sector ranges
   src/session.ts     DVD Session Manager — VM event loop + video orchestration
   e2e/               Playwright tests
 wasm/
@@ -151,7 +152,13 @@ The core of playback is `dvd_get_next_event()` in `glue.c`. It loops `dvdnav_get
 
 ### MEMFS requirements
 
-The WASM VM needs **both IFO and VOB files** in Emscripten's MEMFS to function. IFO files provide structure; VOB files contain the NAV packs that `dvdnav_get_next_block()` reads for navigation decisions. Without VOBs, the VM cannot navigate. Both are fetched from the server at session init.
+The WASM VM needs **both IFO and VOB files** in Emscripten's MEMFS to function. IFO files provide structure; VOB files contain the NAV packs that `dvdnav_get_next_block()` reads for navigation decisions. Without VOBs, the VM cannot navigate.
+
+Loading happens in two blocking phases before `dvd_open()`:
+1. **Phase 1:** All IFO/BUP files + VMGM (top-level menu) VOBs
+2. **Phase 2:** VTS menu VOBs — small VOBs are fetched fully; large VOBs (>1MB) use **per-PGC partial loading**, fetching only the root menu PGC's cell sectors and filling the rest with zeros. Sub-menu cells are loaded on demand at CELL_CHANGE via `ensureMenuCellLoaded()`.
+
+Both phases complete before the VM opens the disc, eliminating timing races between JS fetches and the C code's internal `fopen` calls.
 
 ### First Play PGC handling
 
@@ -198,7 +205,7 @@ Chapter and menu cell playback use VOB-absolute sector offsets from the IFO cell
 - [x] Full menu → movie → menu flow
 - [x] On-screen DVD remote (arrows, OK, Menu)
 - [ ] Subpicture stream parsing and RLE decoding (currently rectangle highlights only)
-- [ ] On-demand VOB block reading (fetch blocks as VM requests them instead of loading entire menu VOBs into MEMFS — needed for fast startup from optical/network drives)
+- [x] Per-PGC partial VOB loading (large menu VOBs load only the root PGC's cells; sub-menu cells fetched on demand at CELL_CHANGE)
 
 ### M4: Full Experience
 - [ ] Subtitle rendering during playback
