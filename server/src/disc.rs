@@ -1,10 +1,16 @@
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+#[cfg(has_dvdread)]
+use crate::dvdread::{self, DvdReader};
 
 /// Represents a VIDEO_TS directory on disk.
 pub struct Disc {
     pub path: PathBuf,
     vts_ifos: Vec<PathBuf>,
     vobs: Vec<PathBuf>,
+    #[cfg(has_dvdread)]
+    dvdread: Option<Mutex<DvdReader>>,
 }
 
 impl Disc {
@@ -39,10 +45,29 @@ impl Disc {
             anyhow::bail!("No VOB files found in {}", video_ts.display());
         }
 
+        // Try to open via libdvdread for CSS decryption support.
+        // DVDOpen wants the disc root (parent of VIDEO_TS), not VIDEO_TS itself.
+        #[cfg(has_dvdread)]
+        let dvdread = {
+            let dvd_root = video_ts.parent().unwrap_or(video_ts);
+            match DvdReader::open(dvd_root) {
+                Ok(reader) => {
+                    tracing::info!("libdvdread available — CSS decryption enabled");
+                    Some(Mutex::new(reader))
+                }
+                Err(e) => {
+                    tracing::warn!("libdvdread unavailable ({e}), using raw file I/O");
+                    None
+                }
+            }
+        };
+
         Ok(Self {
             path: video_ts.to_path_buf(),
             vts_ifos,
             vobs,
+            #[cfg(has_dvdread)]
+            dvdread,
         })
     }
 
@@ -188,5 +213,45 @@ impl Disc {
         sets.sort();
         sets.dedup();
         sets
+    }
+
+    /// Read a DVD file by name, using libdvdread for CSS decryption if
+    /// available, otherwise falling back to raw file I/O.
+    pub fn read_file(&self, filename: &str) -> anyhow::Result<Vec<u8>> {
+        #[cfg(has_dvdread)]
+        if let Some(ref dvdread_mutex) = self.dvdread {
+            if let Some((titlenum, domain)) = dvdread::parse_dvd_filename(filename) {
+                let reader = dvdread_mutex.lock().unwrap();
+                return reader.read_file(titlenum, domain);
+            }
+        }
+
+        // Fallback: raw file I/O
+        let upper = filename.to_uppercase();
+        let path = self.path.join(&upper);
+        Ok(std::fs::read(&path)?)
+    }
+
+    /// Read VOB blocks via libdvdread (for transcoding with sector offsets).
+    /// Returns None if dvdread is unavailable — caller should use raw file I/O.
+    #[cfg(has_dvdread)]
+    pub fn read_vob_blocks(
+        &self,
+        titlenum: i32,
+        domain: dvdread::DvdReadDomain,
+        start_block: u32,
+        block_count: u32,
+    ) -> Option<anyhow::Result<Vec<u8>>> {
+        let dvdread_mutex = self.dvdread.as_ref()?;
+        let reader = dvdread_mutex.lock().unwrap();
+        Some(reader.read_vob_blocks(titlenum, domain, start_block, block_count))
+    }
+
+    /// Whether libdvdread is active for this disc.
+    pub fn has_dvdread(&self) -> bool {
+        #[cfg(has_dvdread)]
+        { self.dvdread.is_some() }
+        #[cfg(not(has_dvdread))]
+        { false }
     }
 }

@@ -15,3 +15,6 @@ tracing-subscriber = "0.3"
 anyhow = "1"
 tempfile = "3"
 tokio-util = { version = "0.7", features = ["io"] }
+
+[build-dependencies]
+pkg-config = "0.3"

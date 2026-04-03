@@ -161,6 +161,25 @@ test.describe("DVD menu navigation", () => {
     expect(src).toContain("/api/transcode/");
   });
 
+  test("lazy VTS loading defers menu VOBs until needed", async ({ page }) => {
+    const logs: string[] = [];
+    page.on("console", (msg) => logs.push(msg.text()));
+
+    await page.goto("/");
+    await waitForMenu(page);
+
+    // Phase 1 should have loaded IFOs + VMGM VOB only
+    const phase1Log = logs.find((l) => l.includes("Phase 1:"));
+    expect(phase1Log).toBeTruthy();
+    expect(phase1Log).toContain("IFO/BUP");
+    expect(phase1Log).toContain("VMGM VOB");
+
+    // VTS menu VOBs should have been background-loaded
+    // (on the test disc VTS_01_0.VOB is 147KB, so it loads quickly)
+    const bgLogs = logs.filter((l) => l.includes("Background-loaded"));
+    expect(bgLogs.length).toBeGreaterThanOrEqual(1);
+  });
+
   test("title switching from menu changes video source", async ({ page }) => {
     await page.goto("/");
     await waitForMenu(page);

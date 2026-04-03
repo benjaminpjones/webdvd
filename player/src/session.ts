@@ -448,6 +448,13 @@ export class SessionManager {
           this.log(
             `VTS change: ${ev.oldVtsN} → ${ev.newVtsN} (domain ${ev.oldDomain} → ${ev.newDomain})`,
           );
+          // Ensure the VTS menu VOB is loaded (may await background fetch)
+          if (this.currentVts > 0) {
+            const waited = await this.session.ensureVtsLoaded(this.currentVts);
+            if (waited) {
+              this.log(`VTS ${this.currentVts} menu VOB loaded on demand`);
+            }
+          }
           awaitingTransition = false;
           continue;
 

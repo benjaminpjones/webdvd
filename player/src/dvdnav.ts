@@ -234,8 +234,21 @@ function langCodeToString(code: number): string {
   return String.fromCharCode((code >> 8) & 0xff, code & 0xff);
 }
 
-/** Fetch all IFO/BUP + VOB files from server and write them into Emscripten MEMFS */
-async function loadDiscFiles(mod: DvdnavModule): Promise<string> {
+/** State for lazy VTS menu VOB loading */
+export interface LoadState {
+  vtsPath: string;
+  mod: DvdnavModule;
+  /** Background fetches still in flight (vtsN → promise) */
+  pendingVobs: Map<number, Promise<void>>;
+  /** VTS numbers whose menu VOBs are fully loaded in MEMFS */
+  loadedVts: Set<number>;
+}
+
+/**
+ * Fetch IFO/BUP files and VMGM VOB eagerly, then background-fetch VTS menu
+ * VOBs. Returns a LoadState that tracks which VTS VOBs are ready.
+ */
+async function loadDiscFiles(mod: DvdnavModule): Promise<LoadState> {
   const vtsPath = "/dvd/VIDEO_TS";
   mod.FS.mkdir("/dvd");
   mod.FS.mkdir(vtsPath);
@@ -251,14 +264,6 @@ async function loadDiscFiles(mod: DvdnavModule): Promise<string> {
   const ifoFiles: string[] = await ifoRes.json();
   const allVobs: string[] = await vobRes.json();
 
-  // Only load menu VOBs into MEMFS — VIDEO_TS.VOB and VTS_NN_0.VOB.
-  // Title VOBs (VTS_NN_1+.VOB) are multi-GB and not needed: the VM
-  // produces navigation events (CELL_CHANGE, VTS_CHANGE) from IFO data
-  // before reading title VOB blocks, and the server handles transcoding.
-  const vobFiles = allVobs.filter(
-    (name) => name.startsWith("VIDEO_TS") || name.match(/^VTS_\d+_0\.VOB$/),
-  );
-
   const fetchFile = async (name: string, endpoint: string) => {
     const resp = await fetch(`/api/${endpoint}/${name}`);
     if (!resp.ok) throw new Error(`Failed to fetch ${name}: ${resp.statusText}`);
@@ -266,45 +271,61 @@ async function loadDiscFiles(mod: DvdnavModule): Promise<string> {
     mod.FS.writeFile(`${vtsPath}/${name}`, buf);
   };
 
+  // --- Phase 1 (blocking): IFOs/BUPs + VMGM VOB ---
+  const vmgmVobs = allVobs.filter((name) => name.startsWith("VIDEO_TS"));
   await Promise.all([
     ...ifoFiles.map((name) => fetchFile(name, "ifo")),
-    ...vobFiles.map((name) => fetchFile(name, "vob")),
+    ...vmgmVobs.map((name) => fetchFile(name, "vob")),
   ]);
 
-  // Create empty placeholder VOBs for any titleset that has IFOs but no
-  // menu VOB. libdvdread needs these files to exist (even if 0-byte) or
-  // DVDOpenFile fails when the VM transitions through that domain.
-  const ifoSet = new Set(ifoFiles);
-  const vobSet = new Set(vobFiles);
-  // VMGM: VIDEO_TS.VOB
-  if (ifoSet.has("VIDEO_TS.IFO") && !vobSet.has("VIDEO_TS.VOB")) {
+  // Create 0-byte placeholders for ALL VTS VOBs (menu + title).
+  // libdvdread needs these files to exist or DVDOpenFile fails.
+  const vmgmSet = new Set(vmgmVobs);
+  if (!vmgmSet.has("VIDEO_TS.VOB")) {
     mod.FS.writeFile(`${vtsPath}/VIDEO_TS.VOB`, new Uint8Array(0));
     console.log("[dvdnav] Created empty VIDEO_TS.VOB placeholder");
   }
-  // VTS menus: VTS_NN_0.VOB
-  // VTS titles: VTS_NN_1.VOB (libdvdnav opens title VOBs during VTS init,
-  // even when navigating to the menu domain; without a placeholder file
-  // the open fails and menu navigation breaks)
   for (const ifo of ifoFiles) {
     const m = ifo.match(/^(VTS_\d+)_0\.IFO$/);
     if (m) {
-      const menuVob = `${m[1]}_0.VOB`;
-      if (!vobSet.has(menuVob)) {
-        mod.FS.writeFile(`${vtsPath}/${menuVob}`, new Uint8Array(0));
-        console.log(`[dvdnav] Created empty ${menuVob} placeholder`);
-      }
-      const titleVob = `${m[1]}_1.VOB`;
-      if (!vobSet.has(titleVob)) {
-        mod.FS.writeFile(`${vtsPath}/${titleVob}`, new Uint8Array(0));
-        console.log(`[dvdnav] Created empty ${titleVob} placeholder`);
-      }
+      mod.FS.writeFile(`${vtsPath}/${m[1]}_0.VOB`, new Uint8Array(0));
+      mod.FS.writeFile(`${vtsPath}/${m[1]}_1.VOB`, new Uint8Array(0));
     }
   }
 
   console.log(
-    `[dvdnav] Loaded ${ifoFiles.length} IFO/BUP + ${vobFiles.length} VOB files into MEMFS`,
+    `[dvdnav] Phase 1: loaded ${ifoFiles.length} IFO/BUP + ${vmgmVobs.length} VMGM VOB files`,
   );
-  return vtsPath;
+
+  // --- Phase 2 (background): VTS menu VOBs ---
+  const loadedVts = new Set<number>();
+  const pendingVobs = new Map<number, Promise<void>>();
+  const vtsMenuVobs = allVobs.filter((name) => name.match(/^VTS_\d+_0\.VOB$/));
+
+  for (const vobName of vtsMenuVobs) {
+    const m = vobName.match(/^VTS_(\d+)_0\.VOB$/);
+    if (!m) continue;
+    const vtsN = parseInt(m[1], 10);
+
+    const promise = fetch(`/api/vob/${vobName}`)
+      .then((r) => {
+        if (!r.ok) throw new Error(`Failed to fetch ${vobName}: ${r.statusText}`);
+        return r.arrayBuffer();
+      })
+      .then((buf) => {
+        const data = new Uint8Array(buf);
+        if (data.byteLength > 0) {
+          mod.FS.writeFile(`${vtsPath}/${vobName}`, data);
+          console.log(`[dvdnav] Background-loaded ${vobName} (${data.byteLength} bytes)`);
+        }
+        loadedVts.add(vtsN);
+        pendingVobs.delete(vtsN);
+      });
+
+    pendingVobs.set(vtsN, promise);
+  }
+
+  return { vtsPath, mod, pendingVobs, loadedVts };
 }
 
 /** Query disc structure from an open dvdnav handle */
@@ -361,9 +382,28 @@ export class DvdSession {
   private dvd: DvdnavBindings;
   private discPath: string;
   private _structure: DiscStructure | null = null;
-  constructor(_mod: DvdnavModule, dvd: DvdnavBindings, discPath: string) {
+  private loadState: LoadState | null = null;
+  constructor(_mod: DvdnavModule, dvd: DvdnavBindings, discPath: string, loadState?: LoadState) {
     this.dvd = dvd;
     this.discPath = discPath;
+    this.loadState = loadState ?? null;
+  }
+
+  /**
+   * Ensure a VTS menu VOB is loaded into MEMFS. If a background fetch is
+   * still in flight, awaits it. Returns true if we had to wait.
+   */
+  async ensureVtsLoaded(vtsN: number): Promise<boolean> {
+    if (!this.loadState) return false;
+    if (this.loadState.loadedVts.has(vtsN)) return false;
+
+    const pending = this.loadState.pendingVobs.get(vtsN);
+    if (pending) {
+      console.log(`[dvdnav] Waiting for VTS ${vtsN} menu VOB to finish loading...`);
+      await pending;
+      return true;
+    }
+    return false;
   }
 
   getNextEvent(): NavEvent {
@@ -500,14 +540,14 @@ export class DvdSession {
 export async function initSession(): Promise<DvdSession> {
   const mod = await getModule();
   const dvd = bindFunctions(mod);
-  const vtsPath = await loadDiscFiles(mod);
+  const loadState = await loadDiscFiles(mod);
 
-  const rc = dvd.open(vtsPath);
+  const rc = dvd.open(loadState.vtsPath);
   if (rc !== 0) {
     throw new Error(`dvdnav_open failed: ${dvd.error()}`);
   }
 
-  return new DvdSession(mod, dvd, vtsPath);
+  return new DvdSession(mod, dvd, loadState.vtsPath, loadState);
 }
 
 /** One-shot convenience: load WASM, fetch IFOs, open disc, return structure */

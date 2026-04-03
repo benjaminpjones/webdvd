@@ -39,13 +39,17 @@ async fn ifo_file(
     State(state): State<AppState>,
     Path(filename): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let path = state
+    // Validate the filename exists on disc
+    state
         .disc
         .video_ts_file(&filename)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("File not found: {filename}")))?;
 
-    let bytes = tokio::fs::read(&path)
+    let disc = state.disc.clone();
+    let fname = filename.clone();
+    let bytes = tokio::task::spawn_blocking(move || disc.read_file(&fname))
         .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok((
@@ -62,13 +66,17 @@ async fn vob_file(
     State(state): State<AppState>,
     Path(filename): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let path = state
+    // Validate the filename exists on disc
+    state
         .disc
         .vob_file(&filename)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("VOB not found: {filename}")))?;
 
-    let bytes = tokio::fs::read(&path)
+    let disc = state.disc.clone();
+    let fname = filename.clone();
+    let bytes = tokio::task::spawn_blocking(move || disc.read_file(&fname))
         .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok((
@@ -107,7 +115,7 @@ async fn transcode_menu(
         last_sector: params.last_sector,
     };
 
-    let body = transcode::transcode_to_stream(&vobs, &opts)
+    let body = transcode::transcode_to_stream(&vobs, &opts, &state.disc, titleset, true)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -137,7 +145,7 @@ async fn transcode_titleset(
         last_sector: params.last_sector,
     };
 
-    let body = transcode::transcode_to_stream(&vobs, &opts)
+    let body = transcode::transcode_to_stream(&vobs, &opts, &state.disc, titleset, false)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

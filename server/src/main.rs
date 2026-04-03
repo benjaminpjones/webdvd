@@ -1,5 +1,7 @@
 mod api;
 mod disc;
+#[cfg(has_dvdread)]
+mod dvdread;
 mod transcode;
 
 use clap::Parser;

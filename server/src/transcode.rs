@@ -1,8 +1,11 @@
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio_util::io::ReaderStream;
+
+use crate::disc::Disc;
 
 /// Transcode options for extracting a specific segment.
 #[derive(Default)]
@@ -21,15 +24,21 @@ pub struct TranscodeOpts {
 
 /// Spawn ffmpeg to transcode VOB files into H.264/AAC fMP4, returning a
 /// streaming body. Playback can begin as soon as the first fragment arrives.
+///
+/// When `disc.has_dvdread()` is true, VOB data is read through libdvdread
+/// for CSS decryption and piped to ffmpeg via stdin.
 pub async fn transcode_to_stream(
     vob_files: &[&Path],
     opts: &TranscodeOpts,
+    disc: &Arc<Disc>,
+    titleset: u32,
+    is_menu: bool,
 ) -> anyhow::Result<axum::body::Body> {
     if vob_files.is_empty() {
         anyhow::bail!("No VOB files to transcode");
     }
 
-    // Build concat list for ffmpeg
+    // Build concat list for ffmpeg (used when dvdread is not active)
     let concat_list: String = vob_files
         .iter()
         .map(|p| format!("file '{}'", p.display()))
@@ -39,17 +48,17 @@ pub async fn transcode_to_stream(
     let concat_file = tempfile::NamedTempFile::new()?;
     std::fs::write(concat_file.path(), &concat_list)?;
 
-    // When sector is specified, pipe VOB data from that byte offset via stdin.
-    // This handles DVD menu sub-menus where different PGCs share the same VOB
-    // but start at different sector positions.
-    let use_stdin = opts.sector.is_some();
+    // When dvdread is active, always pipe through stdin for CSS decryption.
+    // When sector is specified, also use stdin for sector-based seeking.
+    let use_stdin = opts.sector.is_some() || disc.has_dvdread();
 
     tracing::info!(
-        "Transcoding {} VOB file(s) to streaming fMP4 (ss={:?}, t={:?}, sector={:?})",
+        "Transcoding {} VOB file(s) to streaming fMP4 (ss={:?}, t={:?}, sector={:?}, dvdread={})",
         vob_files.len(),
         opts.start_secs,
         opts.duration_secs,
         opts.sector,
+        disc.has_dvdread(),
     );
 
     let mut args: Vec<String> = Vec::new();
@@ -60,7 +69,7 @@ pub async fn transcode_to_stream(
     }
 
     if use_stdin {
-        // Read from stdin (we'll pipe VOB data from the sector offset)
+        // Read from stdin (we'll pipe VOB data)
         args.extend([
             "-y".to_string(),
             "-f".to_string(), "mpeg".to_string(),
@@ -103,97 +112,23 @@ pub async fn transcode_to_stream(
         .stderr(Stdio::null())
         .spawn()?;
 
-    // If sector-based seeking, pipe VOB data from the byte offset to ffmpeg stdin.
-    // Handles multi-VOB titlesets by finding which file contains the start sector
-    // and reading across file boundaries.
-    if let Some(sector) = opts.sector {
-        let byte_offset = sector * 2048;
-        let max_bytes: Option<u64> = opts.last_sector.map(|last| {
-            (last - sector + 1) * 2048
-        });
-        let vob_paths: Vec<_> = vob_files.iter().map(|p| p.to_path_buf()).collect();
+    if use_stdin {
         let mut stdin = child.stdin.take()
             .ok_or_else(|| anyhow::anyhow!("Failed to capture ffmpeg stdin"))?;
 
-        tracing::info!(
-            "Piping {} VOB(s) from byte {byte_offset} (sector {sector}), max_bytes={:?}",
-            vob_paths.len(), max_bytes,
-        );
+        let sector = opts.sector;
+        let last_sector = opts.last_sector;
+        let vob_paths: Vec<_> = vob_files.iter().map(|p| p.to_path_buf()).collect();
+        let disc = disc.clone();
 
         tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
-
-            // Find which VOB file contains the start offset and seek into it.
-            // VOB files are logically concatenated, so we accumulate sizes.
-            let mut cumulative: u64 = 0;
-            let mut start_file_idx = 0;
-            let mut offset_in_file = byte_offset;
-
-            for (i, path) in vob_paths.iter().enumerate() {
-                let meta = match tokio::fs::metadata(path).await {
-                    Ok(m) => m,
-                    Err(e) => {
-                        tracing::error!("Failed to stat VOB {}: {e}", path.display());
-                        return;
-                    }
-                };
-                let size = meta.len();
-                if cumulative + size > byte_offset {
-                    start_file_idx = i;
-                    offset_in_file = byte_offset - cumulative;
-                    break;
-                }
-                cumulative += size;
-            }
-
-            let mut buf = vec![0u8; 65536];
-            let mut bytes_written: u64 = 0;
-
-            for path in &vob_paths[start_file_idx..] {
-                let mut file = match tokio::fs::File::open(path).await {
-                    Ok(f) => f,
-                    Err(e) => {
-                        tracing::error!("Failed to open VOB {}: {e}", path.display());
-                        return;
-                    }
-                };
-                // Seek into the first file; subsequent files start from 0
-                if offset_in_file > 0 {
-                    if let Err(e) = tokio::io::AsyncSeekExt::seek(
-                        &mut file,
-                        std::io::SeekFrom::Start(offset_in_file),
-                    ).await {
-                        tracing::error!("Failed to seek VOB: {e}");
-                        return;
-                    }
-                    offset_in_file = 0;
-                }
-
-                loop {
-                    let to_read = if let Some(max) = max_bytes {
-                        let remaining = max.saturating_sub(bytes_written);
-                        if remaining == 0 { break; }
-                        buf.len().min(remaining as usize)
-                    } else {
-                        buf.len()
-                    };
-                    match file.read(&mut buf[..to_read]).await {
-                        Ok(0) => break, // EOF of this file — continue to next
-                        Ok(n) => {
-                            bytes_written += n as u64;
-                            if stdin.write_all(&buf[..n]).await.is_err() {
-                                let _ = stdin.shutdown().await;
-                                return;
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-
-                // If byte limit reached, stop
-                if let Some(max) = max_bytes {
-                    if bytes_written >= max { break; }
-                }
+            let result = if disc.has_dvdread() {
+                pipe_dvdread(&disc, titleset, is_menu, sector, last_sector, &mut stdin).await
+            } else {
+                pipe_raw_files(&vob_paths, sector, last_sector, &mut stdin).await
+            };
+            if let Err(e) = result {
+                tracing::error!("Stdin pipe error: {e}");
             }
             let _ = stdin.shutdown().await;
         });
@@ -218,4 +153,156 @@ pub async fn transcode_to_stream(
 
     let stream = ReaderStream::new(stdout);
     Ok(axum::body::Body::from_stream(stream))
+}
+
+/// Pipe VOB data through libdvdread (CSS-decrypted) to ffmpeg stdin.
+async fn pipe_dvdread(
+    disc: &Arc<Disc>,
+    titleset: u32,
+    is_menu: bool,
+    sector: Option<u64>,
+    last_sector: Option<u64>,
+    stdin: &mut tokio::process::ChildStdin,
+) -> anyhow::Result<()> {
+    let disc = disc.clone();
+    let vob_name = if is_menu {
+        if titleset == 0 {
+            "VIDEO_TS.VOB".to_string()
+        } else {
+            format!("VTS_{:02}_0.VOB", titleset)
+        }
+    } else {
+        format!("VTS_{:02}_1.VOB", titleset)
+    };
+
+    // Read through dvdread in a blocking task
+    let data = tokio::task::spawn_blocking(move || {
+        if let Some(start_sector) = sector {
+            // Sector-based read: only the requested range
+            let block_count = match last_sector {
+                Some(last) => (last - start_sector + 1) as u32,
+                None => {
+                    // Read from start_sector to end of file — get file size first
+                    // and compute remaining blocks. Fall back to reading the whole file.
+                    let full = disc.read_file(&vob_name)?;
+                    let total_blocks = (full.len() / 2048) as u64;
+                    if start_sector >= total_blocks {
+                        return Ok(Vec::new());
+                    }
+                    (total_blocks - start_sector) as u32
+                }
+            };
+
+            #[cfg(has_dvdread)]
+            {
+                use crate::dvdread::DvdReadDomain;
+                let domain = if is_menu {
+                    DvdReadDomain::MenuVobs
+                } else {
+                    DvdReadDomain::TitleVobs
+                };
+                if let Some(result) = disc.read_vob_blocks(
+                    titleset as i32,
+                    domain,
+                    start_sector as u32,
+                    block_count,
+                ) {
+                    return result;
+                }
+            }
+
+            // Fallback: slice from full file read
+            let full = disc.read_file(&vob_name)?;
+            let start = start_sector as usize * 2048;
+            let end = (start + block_count as usize * 2048).min(full.len());
+            Ok(full[start..end].to_vec())
+        } else {
+            // No sector offset: read the whole file
+            disc.read_file(&vob_name)
+        }
+    })
+    .await??;
+
+    tracing::info!("Piping {} bytes of decrypted VOB data to ffmpeg", data.len());
+    stdin.write_all(&data).await?;
+    Ok(())
+}
+
+/// Pipe raw VOB file data to ffmpeg stdin (original non-dvdread path).
+async fn pipe_raw_files(
+    vob_paths: &[std::path::PathBuf],
+    sector: Option<u64>,
+    last_sector: Option<u64>,
+    stdin: &mut tokio::process::ChildStdin,
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncReadExt;
+
+    let byte_offset = sector.map(|s| s * 2048).unwrap_or(0);
+    let max_bytes: Option<u64> = match (sector, last_sector) {
+        (Some(s), Some(last)) => Some((last - s + 1) * 2048),
+        _ => None,
+    };
+
+    // Find which VOB file contains the start offset
+    let mut cumulative: u64 = 0;
+    let mut start_file_idx = 0;
+    let mut offset_in_file = byte_offset;
+
+    for (i, path) in vob_paths.iter().enumerate() {
+        let meta = tokio::fs::metadata(path).await?;
+        let size = meta.len();
+        if cumulative + size > byte_offset {
+            start_file_idx = i;
+            offset_in_file = byte_offset - cumulative;
+            break;
+        }
+        cumulative += size;
+    }
+
+    tracing::info!(
+        "Piping {} VOB(s) from byte {byte_offset} (sector {:?}), max_bytes={:?}",
+        vob_paths.len(), sector, max_bytes,
+    );
+
+    let mut buf = vec![0u8; 65536];
+    let mut bytes_written: u64 = 0;
+
+    for path in &vob_paths[start_file_idx..] {
+        let mut file = tokio::fs::File::open(path).await?;
+        // Seek into the first file; subsequent files start from 0
+        if offset_in_file > 0 {
+            tokio::io::AsyncSeekExt::seek(
+                &mut file,
+                std::io::SeekFrom::Start(offset_in_file),
+            ).await?;
+            offset_in_file = 0;
+        }
+
+        loop {
+            let to_read = if let Some(max) = max_bytes {
+                let remaining = max.saturating_sub(bytes_written);
+                if remaining == 0 { break; }
+                buf.len().min(remaining as usize)
+            } else {
+                buf.len()
+            };
+            match file.read(&mut buf[..to_read]).await {
+                Ok(0) => break, // EOF of this file — continue to next
+                Ok(n) => {
+                    bytes_written += n as u64;
+                    if stdin.write_all(&buf[..n]).await.is_err() {
+                        return Ok(());
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        // If byte limit reached, stop
+        if let Some(max) = max_bytes {
+            if bytes_written >= max { break; }
+        }
+    }
+
+    Ok(())
 }
