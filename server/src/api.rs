@@ -17,6 +17,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/ifo/{filename}", get(ifo_file))
         .route("/api/vob-list", get(vob_list))
         .route("/api/vob/{filename}", get(vob_file))
+        .route("/api/vob-range/{filename}", get(vob_range))
+        .route("/api/vob-size/{filename}", get(vob_size))
         .route("/api/transcode-menu/{titleset}", get(transcode_menu))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -83,6 +85,57 @@ async fn vob_file(
         [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
         bytes,
     ))
+}
+
+#[derive(serde::Deserialize)]
+struct VobRangeParams {
+    start: u64,
+    end: u64,
+}
+
+async fn vob_range(
+    State(state): State<AppState>,
+    Path(filename): Path<String>,
+    Query(params): Query<VobRangeParams>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    state
+        .disc
+        .vob_file(&filename)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("VOB not found: {filename}")))?;
+
+    let disc = state.disc.clone();
+    let fname = filename.clone();
+    let (data, total_size) = tokio::task::spawn_blocking(move || {
+        disc.read_vob_range(&fname, params.start, params.end)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(axum::http::header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
+    headers.insert("x-vob-total-size", total_size.to_string().parse().unwrap());
+
+    Ok((headers, data))
+}
+
+async fn vob_size(
+    State(state): State<AppState>,
+    Path(filename): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    state
+        .disc
+        .vob_file(&filename)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("VOB not found: {filename}")))?;
+
+    let disc = state.disc.clone();
+    let fname = filename.clone();
+    let size = tokio::task::spawn_blocking(move || disc.vob_size(&fname))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "size": size })))
 }
 
 #[derive(serde::Deserialize, Default)]

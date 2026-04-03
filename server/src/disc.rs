@@ -254,4 +254,48 @@ impl Disc {
         #[cfg(not(has_dvdread))]
         { false }
     }
+
+    /// Read a sector range from a VOB file.
+    /// Returns (data, total_file_size).
+    pub fn read_vob_range(
+        &self,
+        filename: &str,
+        start_sector: u64,
+        end_sector: u64,
+    ) -> anyhow::Result<(Vec<u8>, u64)> {
+        let block_count = (end_sector - start_sector + 1) as u32;
+
+        #[cfg(has_dvdread)]
+        if let Some(ref dvdread_mutex) = self.dvdread {
+            if let Some((titlenum, domain)) = dvdread::parse_dvd_filename(filename) {
+                let reader = dvdread_mutex.lock().unwrap();
+                let total_size = reader.file_size(titlenum, domain)?;
+                let data = reader.read_vob_blocks(
+                    titlenum, domain, start_sector as u32, block_count,
+                )?;
+                return Ok((data, total_size));
+            }
+        }
+
+        // Fallback: raw file I/O with seeking
+        let upper = filename.to_uppercase();
+        let path = self.path.join(&upper);
+        let total_size = std::fs::metadata(&path)?.len();
+        let byte_offset = start_sector * 2048;
+        let byte_count = block_count as u64 * 2048;
+
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = std::fs::File::open(&path)?;
+        file.seek(SeekFrom::Start(byte_offset))?;
+        let mut buf = vec![0u8; byte_count as usize];
+        file.read_exact(&mut buf)?;
+        Ok((buf, total_size))
+    }
+
+    /// Get total size of a VOB file in bytes.
+    pub fn vob_size(&self, filename: &str) -> anyhow::Result<u64> {
+        let upper = filename.to_uppercase();
+        let path = self.path.join(&upper);
+        Ok(std::fs::metadata(&path)?.len())
+    }
 }

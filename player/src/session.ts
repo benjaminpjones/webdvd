@@ -410,11 +410,23 @@ export class SessionManager {
             this.log(`Skipping title cell (VTS ${this.currentVts}) during navigation`);
             continue;
           }
-          // Menu cell — track sector and check for buttons
+          // Menu cell — ensure sectors are loaded, then track and check for buttons
           if (!ev.isVts) {
             lastMenuSector = ev.firstSector ?? 0;
             lastMenuLastSector = ev.lastSector ?? 0;
             menuCellsSinceHop++;
+
+            // On-demand: fetch cell sectors if not yet loaded in MEMFS
+            if (lastMenuLastSector > 0 && this.currentVts > 0) {
+              const fetched = await this.session.ensureMenuCellLoaded(
+                this.currentVts,
+                lastMenuSector,
+                lastMenuLastSector,
+              );
+              if (fetched) {
+                this.log(`Loaded menu cell sectors ${lastMenuSector}-${lastMenuLastSector} on demand`);
+              }
+            }
 
             // After HOP_CHANNEL, PCI is stale until NAV_PACKETs from the
             // new PGC are read. The first CELL_CHANGE fires before any

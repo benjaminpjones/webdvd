@@ -13,6 +13,7 @@ const DVD_VIDEO_LB_LEN: usize = 2048;
 
 #[repr(C)]
 #[allow(dead_code)]
+#[derive(Clone, Copy)]
 pub enum DvdReadDomain {
     InfoFile = 0,
     InfoBackupFile = 1,
@@ -128,6 +129,20 @@ impl DvdReader {
         unsafe { DVDCloseFile(file) };
         buf.truncate(bytes_read);
         Ok(buf)
+    }
+
+    /// Get the size of a DVD file in bytes.
+    pub fn file_size(&self, titlenum: i32, domain: DvdReadDomain) -> anyhow::Result<u64> {
+        let file = unsafe { DVDOpenFile(self.handle, titlenum as _, domain) };
+        if file.is_null() {
+            anyhow::bail!("DVDOpenFile failed (titlenum={titlenum})");
+        }
+        let size_blocks = unsafe { DVDFileSize(file) };
+        unsafe { DVDCloseFile(file) };
+        if size_blocks < 0 {
+            anyhow::bail!("DVDFileSize failed (titlenum={titlenum})");
+        }
+        Ok(size_blocks as u64 * DVD_VIDEO_LB_LEN as u64)
     }
 
     /// Read VOB blocks from the DVD with sector-based seeking.

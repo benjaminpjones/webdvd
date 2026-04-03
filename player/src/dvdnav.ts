@@ -242,6 +242,12 @@ export interface LoadState {
   pendingVobs: Map<number, Promise<void>>;
   /** VTS numbers whose menu VOBs are fully loaded in MEMFS */
   loadedVts: Set<number>;
+  /** Per-VTS: parsed PGC cell info from IFO */
+  vtsMenuPgcs: Map<number, import("./ifo-parser").PgcCells[]>;
+  /** Per-VTS: sector ranges already loaded in MEMFS */
+  loadedSectors: Map<number, import("./ifo-parser").CellRange[]>;
+  /** Per-VTS: full VOB buffer (kept in JS for incremental updates) */
+  vobBuffers: Map<number, Uint8Array>;
 }
 
 /**
@@ -297,9 +303,16 @@ async function loadDiscFiles(mod: DvdnavModule): Promise<LoadState> {
     `[dvdnav] Phase 1: loaded ${ifoFiles.length} IFO/BUP + ${vmgmVobs.length} VMGM VOB files`,
   );
 
-  // --- Phase 2 (background): VTS menu VOBs ---
+  // --- Phase 2 (background): VTS menu VOB loading with per-PGC metadata ---
   const loadedVts = new Set<number>();
   const pendingVobs = new Map<number, Promise<void>>();
+  const vtsMenuPgcs = new Map<number, import("./ifo-parser").PgcCells[]>();
+  const loadedSectors = new Map<number, import("./ifo-parser").CellRange[]>();
+  const vobBuffers = new Map<number, Uint8Array>();
+
+  // Dynamically import ifo-parser (only needed for per-PGC loading)
+  const { parseMenuPgcs, ENTRY_ID_ROOT_MENU } = await import("./ifo-parser");
+
   const vtsMenuVobs = allVobs.filter((name) => name.match(/^VTS_\d+_0\.VOB$/));
 
   for (const vobName of vtsMenuVobs) {
@@ -307,25 +320,87 @@ async function loadDiscFiles(mod: DvdnavModule): Promise<LoadState> {
     if (!m) continue;
     const vtsN = parseInt(m[1], 10);
 
-    const promise = fetch(`/api/vob/${vobName}`)
-      .then((r) => {
-        if (!r.ok) throw new Error(`Failed to fetch ${vobName}: ${r.statusText}`);
-        return r.arrayBuffer();
-      })
-      .then((buf) => {
-        const data = new Uint8Array(buf);
-        if (data.byteLength > 0) {
-          mod.FS.writeFile(`${vtsPath}/${vobName}`, data);
-          console.log(`[dvdnav] Background-loaded ${vobName} (${data.byteLength} bytes)`);
+    const promise = (async () => {
+      try {
+        // Fetch IFO + VOB size in parallel (small/fast requests)
+        const ifoName = `VTS_${m[1]}_0.IFO`;
+        const [ifoResp, sizeResp] = await Promise.all([
+          fetch(`/api/ifo/${ifoName}`),
+          fetch(`/api/vob-size/${vobName}`),
+        ]);
+
+        // Parse IFO for PGC cell ranges
+        let pgcs: import("./ifo-parser").PgcCells[] = [];
+        if (ifoResp.ok) {
+          const ifoData = await ifoResp.arrayBuffer();
+          pgcs = parseMenuPgcs(ifoData);
+          vtsMenuPgcs.set(vtsN, pgcs);
         }
+
+        let totalSize = 0;
+        if (sizeResp.ok) {
+          totalSize = (await sizeResp.json()).size;
+        }
+        if (totalSize === 0) { loadedVts.add(vtsN); return; }
+
+        // Determine if partial loading would help
+        const rootPgc = pgcs.find((p) => p.entryId === ENTRY_ID_ROOT_MENU) ?? pgcs[0];
+        const cellRanges = rootPgc?.cells ?? [];
+        const rootBytes = cellRanges.reduce(
+          (sum, r) => sum + (r.lastSector - r.firstSector + 1) * 2048, 0,
+        );
+        const usePartial = rootBytes > 0 && rootBytes < totalSize * 0.75;
+        const totalSectors = Math.ceil(totalSize / 2048);
+
+        if (usePartial) {
+          // Large VOB — load only root PGC's cell sectors
+          const buf = new Uint8Array(totalSize);
+          vobBuffers.set(vtsN, buf);
+
+          const fetches = cellRanges.map(async (range) => {
+            const resp = await fetch(
+              `/api/vob-range/${vobName}?start=${range.firstSector}&end=${range.lastSector}`,
+            );
+            if (!resp.ok) return 0;
+            const data = new Uint8Array(await resp.arrayBuffer());
+            buf.set(data, range.firstSector * 2048);
+            return data.byteLength;
+          });
+          const sizes = await Promise.all(fetches);
+          const bytesLoaded = sizes.reduce((a, b) => a + b, 0);
+
+          mod.FS.writeFile(`${vtsPath}/${vobName}`, buf);
+          loadedSectors.set(vtsN, [...cellRanges]);
+
+          const pct = ((bytesLoaded / totalSize) * 100).toFixed(1);
+          console.log(
+            `[dvdnav] Background-loaded ${vobName}: ${bytesLoaded} of ${totalSize} bytes (${pct}%, root PGC only)`,
+          );
+        } else {
+          // Small VOB or root covers most of it — fetch the whole file
+          const resp = await fetch(`/api/vob/${vobName}`);
+          if (!resp.ok) return;
+          const data = new Uint8Array(await resp.arrayBuffer());
+          if (data.byteLength > 0) {
+            mod.FS.writeFile(`${vtsPath}/${vobName}`, data);
+            vobBuffers.set(vtsN, data);
+            loadedSectors.set(vtsN, [{ firstSector: 0, lastSector: totalSectors - 1 }]);
+            console.log(`[dvdnav] Background-loaded ${vobName} (${data.byteLength} bytes)`);
+          }
+        }
+
         loadedVts.add(vtsN);
+      } catch (err) {
+        console.warn(`[dvdnav] Failed to load ${vobName}:`, err);
+      } finally {
         pendingVobs.delete(vtsN);
-      });
+      }
+    })();
 
     pendingVobs.set(vtsN, promise);
   }
 
-  return { vtsPath, mod, pendingVobs, loadedVts };
+  return { vtsPath, mod, pendingVobs, loadedVts, vtsMenuPgcs, loadedSectors, vobBuffers };
 }
 
 /** Query disc structure from an open dvdnav handle */
@@ -404,6 +479,60 @@ export class DvdSession {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Ensure a menu cell's sectors are loaded in MEMFS.
+   * If the cell's sector range is already loaded, returns immediately.
+   * Otherwise fetches from the server and patches the VOB buffer.
+   */
+  async ensureMenuCellLoaded(
+    vtsN: number,
+    firstSector: number,
+    lastSector: number,
+  ): Promise<boolean> {
+    if (!this.loadState) return false;
+    if (vtsN <= 0) return false;
+
+    const { isSectorRangeLoaded, mergeRanges } = await import("./ifo-parser");
+
+    const loaded = this.loadState.loadedSectors.get(vtsN) ?? [];
+    if (isSectorRangeLoaded(firstSector, lastSector, loaded)) {
+      return false; // already loaded
+    }
+
+    const vobName = `VTS_${String(vtsN).padStart(2, "0")}_0.VOB`;
+    console.log(
+      `[dvdnav] On-demand loading sectors ${firstSector}-${lastSector} from ${vobName}`,
+    );
+
+    const resp = await fetch(
+      `/api/vob-range/${vobName}?start=${firstSector}&end=${lastSector}`,
+    );
+    if (!resp.ok) {
+      console.warn(`[dvdnav] Failed to fetch sectors: ${resp.statusText}`);
+      return false;
+    }
+
+    const data = new Uint8Array(await resp.arrayBuffer());
+    const buf = this.loadState.vobBuffers.get(vtsN);
+    if (buf) {
+      const byteOffset = firstSector * 2048;
+      buf.set(data, byteOffset);
+      this.loadState.mod.FS.writeFile(
+        `${this.loadState.vtsPath}/${vobName}`,
+        buf,
+      );
+    }
+
+    // Track the newly loaded range
+    loaded.push({ firstSector, lastSector });
+    this.loadState.loadedSectors.set(vtsN, mergeRanges(loaded));
+
+    console.log(
+      `[dvdnav] Loaded ${data.byteLength} bytes for sectors ${firstSector}-${lastSector}`,
+    );
+    return true;
   }
 
   getNextEvent(): NavEvent {
