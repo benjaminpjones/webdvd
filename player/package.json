@@ -8,11 +8,13 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "playwright test",
+    "test:unit": "vitest run",
     "test:wasm": "node ../wasm/test.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
     "typescript": "~5.9.3",
-    "vite": "^8.0.1"
+    "vite": "^8.0.1",
+    "vitest": "^3.2.4"
   }
 }

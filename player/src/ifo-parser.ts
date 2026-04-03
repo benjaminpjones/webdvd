@@ -29,6 +29,7 @@ export const ENTRY_ID_ROOT_MENU = 0x83;
  * Returns empty array if no menu PGCI_UT exists.
  */
 export function parseMenuPgcs(ifoData: ArrayBuffer): PgcCells[] {
+  if (ifoData.byteLength < VTSM_PGCI_UT_OFFSET + 4) return [];
   const view = new DataView(ifoData);
 
   const pgciUtSector = view.getUint32(VTSM_PGCI_UT_OFFSET, false);

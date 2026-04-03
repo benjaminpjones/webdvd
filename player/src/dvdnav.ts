@@ -259,7 +259,8 @@ async function loadDiscFiles(mod: DvdnavModule): Promise<LoadState> {
   mod.FS.mkdir("/dvd");
   mod.FS.mkdir(vtsPath);
 
-  // Fetch IFO/BUP and VOB file lists in parallel
+  // Fetch IFO/BUP and VOB file lists + preload ifo-parser module in parallel
+  const ifoParserPromise = import("./ifo-parser");
   const [ifoRes, vobRes] = await Promise.all([
     fetch(`/api/ifo-list`),
     fetch(`/api/vob-list`),
@@ -310,8 +311,8 @@ async function loadDiscFiles(mod: DvdnavModule): Promise<LoadState> {
   const loadedSectors = new Map<number, import("./ifo-parser").CellRange[]>();
   const vobBuffers = new Map<number, Uint8Array>();
 
-  // Dynamically import ifo-parser (only needed for per-PGC loading)
-  const { parseMenuPgcs, ENTRY_ID_ROOT_MENU } = await import("./ifo-parser");
+  // ifo-parser was preloaded in parallel with Phase 1
+  const { parseMenuPgcs, ENTRY_ID_ROOT_MENU } = await ifoParserPromise;
 
   const vtsMenuVobs = allVobs.filter((name) => name.match(/^VTS_\d+_0\.VOB$/));
 
@@ -319,85 +320,101 @@ async function loadDiscFiles(mod: DvdnavModule): Promise<LoadState> {
     const m = vobName.match(/^VTS_(\d+)_0\.VOB$/);
     if (!m) continue;
     const vtsN = parseInt(m[1], 10);
+    const ifoName = `VTS_${m[1]}_0.IFO`;
 
-    const promise = (async () => {
-      try {
-        // Fetch IFO + VOB size in parallel (small/fast requests)
-        const ifoName = `VTS_${m[1]}_0.IFO`;
-        const [ifoResp, sizeResp] = await Promise.all([
-          fetch(`/api/ifo/${ifoName}`),
-          fetch(`/api/vob-size/${vobName}`),
-        ]);
+    // Critical path: fetch VOB immediately and check Content-Length.
+    // For small VOBs, use .then() chains to write to MEMFS with minimal
+    // overhead — the race with the VM's VTS_CHANGE is tight.
+    // For large VOBs (>1MB), abort and use per-PGC partial loading.
+    const promise = fetch(`/api/vob/${vobName}`)
+      .then(async (resp) => {
+        if (!resp.ok) return;
+        const contentLength = parseInt(resp.headers.get("content-length") ?? "0", 10);
 
-        // Parse IFO for PGC cell ranges
-        let pgcs: import("./ifo-parser").PgcCells[] = [];
-        if (ifoResp.ok) {
-          const ifoData = await ifoResp.arrayBuffer();
-          pgcs = parseMenuPgcs(ifoData);
-          vtsMenuPgcs.set(vtsN, pgcs);
-        }
-
-        let totalSize = 0;
-        if (sizeResp.ok) {
-          totalSize = (await sizeResp.json()).size;
-        }
-        if (totalSize === 0) { loadedVts.add(vtsN); return; }
-
-        // Determine if partial loading would help
-        const rootPgc = pgcs.find((p) => p.entryId === ENTRY_ID_ROOT_MENU) ?? pgcs[0];
-        const cellRanges = rootPgc?.cells ?? [];
-        const rootBytes = cellRanges.reduce(
-          (sum, r) => sum + (r.lastSector - r.firstSector + 1) * 2048, 0,
-        );
-        const usePartial = rootBytes > 0 && rootBytes < totalSize * 0.75;
-        const totalSectors = Math.ceil(totalSize / 2048);
-
-        if (usePartial) {
-          // Large VOB — load only root PGC's cell sectors
-          const buf = new Uint8Array(totalSize);
-          vobBuffers.set(vtsN, buf);
-
-          const fetches = cellRanges.map(async (range) => {
-            const resp = await fetch(
-              `/api/vob-range/${vobName}?start=${range.firstSector}&end=${range.lastSector}`,
-            );
-            if (!resp.ok) return 0;
-            const data = new Uint8Array(await resp.arrayBuffer());
-            buf.set(data, range.firstSector * 2048);
-            return data.byteLength;
-          });
-          const sizes = await Promise.all(fetches);
-          const bytesLoaded = sizes.reduce((a, b) => a + b, 0);
-
-          mod.FS.writeFile(`${vtsPath}/${vobName}`, buf);
-          loadedSectors.set(vtsN, [...cellRanges]);
-
-          const pct = ((bytesLoaded / totalSize) * 100).toFixed(1);
-          console.log(
-            `[dvdnav] Background-loaded ${vobName}: ${bytesLoaded} of ${totalSize} bytes (${pct}%, root PGC only)`,
-          );
+        if (contentLength > 1024 * 1024) {
+          // Large VOB — abort full download, use partial PGC loading
+          resp.body?.cancel().catch(() => {});
+          await loadVobPartial(vobName, ifoName, vtsN, contentLength);
         } else {
-          // Small VOB or root covers most of it — fetch the whole file
-          const resp = await fetch(`/api/vob/${vobName}`);
-          if (!resp.ok) return;
+          // Small VOB — consume immediately
           const data = new Uint8Array(await resp.arrayBuffer());
           if (data.byteLength > 0) {
             mod.FS.writeFile(`${vtsPath}/${vobName}`, data);
             vobBuffers.set(vtsN, data);
+            const totalSectors = Math.ceil(data.byteLength / 2048);
             loadedSectors.set(vtsN, [{ firstSector: 0, lastSector: totalSectors - 1 }]);
             console.log(`[dvdnav] Background-loaded ${vobName} (${data.byteLength} bytes)`);
           }
+          // Parse IFO in background for on-demand metadata
+          fetch(`/api/ifo/${ifoName}`)
+            .then(async (r) => {
+              if (!r.ok) return;
+              const pgcs = parseMenuPgcs(await r.arrayBuffer());
+              vtsMenuPgcs.set(vtsN, pgcs);
+            })
+            .catch(() => {});
         }
 
         loadedVts.add(vtsN);
-      } catch (err) {
-        console.warn(`[dvdnav] Failed to load ${vobName}:`, err);
-      } finally {
         pendingVobs.delete(vtsN);
-      }
-    })();
+      });
 
     pendingVobs.set(vtsN, promise);
+  }
+
+  /** Load a large VOB partially — only root PGC cells */
+  async function loadVobPartial(
+    vobName: string, ifoName: string, vtsN: number, totalSize: number,
+  ) {
+    // Fetch IFO to determine PGC cell ranges
+    const ifoResp = await fetch(`/api/ifo/${ifoName}`);
+    let pgcs: import("./ifo-parser").PgcCells[] = [];
+    if (ifoResp.ok) {
+      pgcs = parseMenuPgcs(await ifoResp.arrayBuffer());
+      vtsMenuPgcs.set(vtsN, pgcs);
+    }
+
+    const rootPgc = pgcs.find((p) => p.entryId === ENTRY_ID_ROOT_MENU) ?? pgcs[0];
+    const cellRanges = rootPgc?.cells ?? [];
+    const rootBytes = cellRanges.reduce(
+      (sum, r) => sum + (r.lastSector - r.firstSector + 1) * 2048, 0,
+    );
+
+    const buf = new Uint8Array(totalSize);
+    vobBuffers.set(vtsN, buf);
+
+    if (rootBytes > 0 && rootBytes < totalSize * 0.75) {
+      // Fetch only root PGC cells
+      const fetches = cellRanges.map(async (range) => {
+        const resp = await fetch(
+          `/api/vob-range/${vobName}?start=${range.firstSector}&end=${range.lastSector}`,
+        );
+        if (!resp.ok) return 0;
+        const data = new Uint8Array(await resp.arrayBuffer());
+        buf.set(data, range.firstSector * 2048);
+        return data.byteLength;
+      });
+      const sizes = await Promise.all(fetches);
+      const bytesLoaded = sizes.reduce((a, b) => a + b, 0);
+
+      mod.FS.writeFile(`${vtsPath}/${vobName}`, buf);
+      loadedSectors.set(vtsN, [...cellRanges]);
+
+      const pct = ((bytesLoaded / totalSize) * 100).toFixed(1);
+      console.log(
+        `[dvdnav] Background-loaded ${vobName}: ${bytesLoaded} of ${totalSize} bytes (${pct}%, root PGC only)`,
+      );
+    } else {
+      // Root covers most of VOB — download full
+      const resp = await fetch(`/api/vob/${vobName}`);
+      if (!resp.ok) return;
+      const data = new Uint8Array(await resp.arrayBuffer());
+      buf.set(data);
+      mod.FS.writeFile(`${vtsPath}/${vobName}`, buf);
+      const totalSectors = Math.ceil(data.byteLength / 2048);
+      loadedSectors.set(vtsN, [{ firstSector: 0, lastSector: totalSectors - 1 }]);
+      console.log(`[dvdnav] Background-loaded ${vobName} (${data.byteLength} bytes)`);
+    }
   }
 
   return { vtsPath, mod, pendingVobs, loadedVts, vtsMenuPgcs, loadedSectors, vobBuffers };
