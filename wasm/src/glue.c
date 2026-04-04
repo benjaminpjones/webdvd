@@ -309,21 +309,28 @@ const char* dvd_get_next_event(void) {
             dvd_state_t *state = &nav->vm->state;
             uint32_t first_sector = 0;
             uint32_t last_sector = 0;
+            uint32_t pgc_last_sector = 0;
             if (state->pgc && cell->cellN > 0 &&
                 cell->cellN <= state->pgc->nr_of_cells) {
                 first_sector = state->pgc->cell_playback[cell->cellN - 1].first_sector;
                 last_sector = state->pgc->cell_playback[cell->cellN - 1].last_sector;
+                /* PGC-level last sector: the last sector of the final cell
+                 * in this PGC. Used to bound title playback so the server
+                 * doesn't read past the title into adjacent content. */
+                pgc_last_sector = state->pgc->cell_playback[state->pgc->nr_of_cells - 1].last_sector;
             }
 
             snprintf(json_buf, sizeof(json_buf),
                 "{\"event\":6,\"cellN\":%d,\"pgN\":%d,"
                 "\"pgcLengthMs\":%lld,\"cellStartSectors\":%lld,"
                 "\"firstSector\":%u,\"lastSector\":%u,"
+                "\"pgcLastSector\":%u,"
                 "\"title\":%d,\"part\":%d,\"isVts\":%d}",
                 cell->cellN, cell->pgN,
                 (long long)(cell->pgc_length / 90),
                 (long long)(cell->cell_start),
                 (unsigned)first_sector, (unsigned)last_sector,
+                (unsigned)pgc_last_sector,
                 (int)title, (int)part, is_vts);
             return json_buf;
         }
@@ -548,6 +555,8 @@ const char* dvd_describe_title(int title) {
      * depending on internal libdvdnav headers. */
     int vts = 0;
     int vts_ttn = 0;
+    uint32_t pgc_first_sector = 0;
+    uint32_t pgc_last_sector = 0;
     if (dvd_path[0]) {
         dvd_reader_t *reader = DVDOpen(dvd_path);
         if (reader) {
@@ -558,6 +567,27 @@ const char* dvd_describe_title(int title) {
                 vts_ttn = vmgi->tt_srpt->title[title - 1].vts_ttn;
             }
             if (vmgi) ifoClose(vmgi);
+
+            /* Look up PGC sector bounds from VTS IFO */
+            if (vts > 0 && vts_ttn > 0) {
+                ifo_handle_t *vtsi = ifoOpen(reader, vts);
+                if (vtsi && vtsi->vts_pgcit) {
+                    /* Map vts_ttn to PGC number via VTS_PTT_SRPT */
+                    int pgcN = vts_ttn; /* default: PGC N = ttn */
+                    if (vtsi->vts_ptt_srpt && vts_ttn >= 1 &&
+                        vts_ttn <= (int)vtsi->vts_ptt_srpt->nr_of_srpts) {
+                        pgcN = vtsi->vts_ptt_srpt->title[vts_ttn - 1].ptt[0].pgcn;
+                    }
+                    if (pgcN >= 1 && pgcN <= (int)vtsi->vts_pgcit->nr_of_pgci_srp) {
+                        pgc_t *pgc = vtsi->vts_pgcit->pgci_srp[pgcN - 1].pgc;
+                        if (pgc && pgc->nr_of_cells > 0) {
+                            pgc_first_sector = pgc->cell_playback[0].first_sector;
+                            pgc_last_sector = pgc->cell_playback[pgc->nr_of_cells - 1].last_sector;
+                        }
+                    }
+                }
+                if (vtsi) ifoClose(vtsi);
+            }
             DVDClose(reader);
         }
     }
@@ -565,8 +595,10 @@ const char* dvd_describe_title(int title) {
     int pos = 0;
     pos += snprintf(json_buf + pos, sizeof(json_buf) - pos,
         "{\"chapters\":%u,\"duration_ms\":%llu,\"vts\":%d,\"vts_ttn\":%d,"
+        "\"firstSector\":%u,\"lastSector\":%u,"
         "\"chapter_times_ms\":[",
-        (unsigned)n, (unsigned long long)(duration / 90), vts, vts_ttn);
+        (unsigned)n, (unsigned long long)(duration / 90), vts, vts_ttn,
+        (unsigned)pgc_first_sector, (unsigned)pgc_last_sector);
 
     for (uint32_t i = 0; i < n && pos < (int)sizeof(json_buf) - 32; i++) {
         if (i > 0) json_buf[pos++] = ',';

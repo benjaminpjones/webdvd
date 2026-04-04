@@ -31,10 +31,11 @@ test.describe("DVD disc structure via WASM", () => {
     await expect(discStructure).toContainText("720x480");
     await expect(discStructure).toContainText("4:3");
 
-    // All 3 titles detected
+    // All 4 titles detected
     await expect(discStructure).toContainText("Title 1:");
     await expect(discStructure).toContainText("Title 2:");
     await expect(discStructure).toContainText("Title 3:");
+    await expect(discStructure).toContainText("Title 4:");
 
     // Chapter counts
     await expect(discStructure).toContainText("2 chapter(s)");
@@ -63,7 +64,7 @@ test.describe("DVD disc structure via WASM", () => {
       timeout: 15_000,
     });
 
-    await expect(discInfo).toContainText("3 title(s)");
+    await expect(discInfo).toContainText("4 title(s)");
   });
 
   test("title buttons are rendered", async ({ page }) => {
@@ -83,9 +84,9 @@ test.describe("DVD menu navigation", () => {
     await page.goto("/");
     await waitForMenu(page);
 
-    // Root menu should have 3 buttons
+    // Root menu should have 4 buttons
     const menuLogs = logs.filter((l) => l.includes("[session] Menu"));
-    expect(menuLogs.some((l) => l.includes("3 buttons"))).toBe(true);
+    expect(menuLogs.some((l) => l.includes("4 buttons"))).toBe(true);
   });
 
   test("menu button plays title", async ({ page }) => {
@@ -111,7 +112,8 @@ test.describe("DVD menu navigation", () => {
     await page.goto("/");
     await waitForMenu(page);
 
-    // Navigate to "Chapters" button (button 3 — down twice from button 1)
+    // Navigate to "Chapters" button (button 4 — down three times from button 1)
+    await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Enter");
@@ -143,7 +145,8 @@ test.describe("DVD menu navigation", () => {
     await page.goto("/");
     await waitForMenu(page);
 
-    // Navigate to "Chapters" sub-menu
+    // Navigate to "Chapters" sub-menu (button 4)
+    await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Enter");
@@ -186,11 +189,11 @@ test.describe("DVD menu navigation", () => {
 
     const status = page.locator("#status");
 
-    // Click Title 3 button directly (bypasses menu)
-    const title3Btn = page.locator(".title-btn[data-title='3']");
-    await title3Btn.click();
+    // Click Title 4 button directly (bypasses menu) — Title 4 = VTS 3 (red)
+    const title4Btn = page.locator(".title-btn[data-title='4']");
+    await title4Btn.click();
 
-    await expect(status).toContainText("Playing title 3", { timeout: 30_000 });
+    await expect(status).toContainText("Playing title 4", { timeout: 30_000 });
 
     const video = page.locator("#video");
     const src = await video.getAttribute("src");
@@ -206,5 +209,49 @@ test.describe("DVD menu navigation", () => {
     expect(state.paused).toBe(false);
     expect(state.readyState).toBeGreaterThanOrEqual(2);
     expect(state.duration).toBeGreaterThan(0);
+  });
+
+  test("multi-PGC title passes sector bounds to server", async ({ page }) => {
+    const logs: string[] = [];
+    page.on("console", (msg) => logs.push(msg.text()));
+
+    await page.goto("/");
+    await waitForMenu(page);
+
+    const status = page.locator("#status");
+
+    // Play Title 3 (VTS 2, PGC 2 — starts mid-VOB at sector 644)
+    const title3Btn = page.locator(".title-btn[data-title='3']");
+    await title3Btn.click();
+
+    await expect(status).toContainText("Playing title 3", { timeout: 30_000 });
+
+    const video = page.locator("#video");
+    const src = await video.getAttribute("src");
+    // Should transcode VTS 2 with both sector and lastSector params
+    expect(src).toContain("/api/transcode/2");
+    expect(src).toMatch(/sector=\d+/);
+    expect(src).toMatch(/lastSector=\d+/);
+
+    // The sector should be > 0 (PGC 2 doesn't start at beginning of VOB)
+    const sectorMatch = src?.match(/sector=(\d+)/);
+    expect(sectorMatch).toBeTruthy();
+    const sector = parseInt(sectorMatch![1], 10);
+    expect(sector).toBeGreaterThan(0);
+
+    // Verify the session log shows the non-zero sector and lastSector
+    const playLog = logs.find((l) => l.includes("[session] Playing VTS"));
+    expect(playLog).toBeTruthy();
+    expect(playLog).toContain("lastSector=");
+
+    // Video should play without errors
+    const state = await video.evaluate((v: HTMLVideoElement) => ({
+      error: v.error?.message ?? null,
+      paused: v.paused,
+      readyState: v.readyState,
+    }));
+    expect(state.error).toBeNull();
+    expect(state.paused).toBe(false);
+    expect(state.readyState).toBeGreaterThanOrEqual(2);
   });
 });

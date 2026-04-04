@@ -155,10 +155,42 @@ pub async fn transcode_to_stream(
     Ok(axum::body::Body::from_stream(stream))
 }
 
+/// Parse a NAV pack sector to extract DSI fields needed for ILVU navigation.
+/// Returns (vobu_ea, vob_id, ilvu_flag, ilvu_ea) or None if the sector
+/// doesn't look like a valid NAV pack.
+fn parse_nav_pack(sector_data: &[u8]) -> Option<(u32, u16, bool, u32)> {
+    if sector_data.len() < 2048 {
+        return None;
+    }
+    // DSI data starts at byte 0x407 in the NAV pack sector.
+    // dsi_gi layout: nv_pck_scr(4) + nv_pck_lbn(4) + vobu_ea(4) +
+    //   1stref_ea(4) + 2ndref_ea(4) + 3rdref_ea(4) + vobu_vob_idn(2)
+    let dsi = 0x407;
+    let vobu_ea = u32::from_be_bytes([
+        sector_data[dsi + 8], sector_data[dsi + 9],
+        sector_data[dsi + 10], sector_data[dsi + 11],
+    ]);
+    let vob_id = u16::from_be_bytes([
+        sector_data[dsi + 24], sector_data[dsi + 25],
+    ]);
+    // sml_pbi starts at dsi + 32 (sizeof dsi_gi)
+    let sml = dsi + 32;
+    let category = u16::from_be_bytes([
+        sector_data[sml], sector_data[sml + 1],
+    ]);
+    let ilvu_flag = (category >> 14) & 1 == 1;
+    let ilvu_ea = u32::from_be_bytes([
+        sector_data[sml + 2], sector_data[sml + 3],
+        sector_data[sml + 4], sector_data[sml + 5],
+    ]);
+    Some((vobu_ea, vob_id, ilvu_flag, ilvu_ea))
+}
+
 /// Pipe VOB data through libdvdread (CSS-decrypted) to ffmpeg stdin.
 ///
 /// Reads in chunks via a channel to avoid loading multi-GB title VOBs
-/// into memory at once.
+/// into memory at once. Handles interleaved (ILVU) cells by reading
+/// VOBU-by-VOBU and skipping alternate-angle data.
 async fn pipe_dvdread(
     disc: &Arc<Disc>,
     titleset: u32,
@@ -197,26 +229,95 @@ async fn pipe_dvdread(
                 remaining * 2048 / (1024 * 1024),
             );
 
-            // Read blocks in a blocking task, send chunks through a channel
+            // Read blocks in a blocking task, send chunks through a channel.
+            // Uses VOBU-aware reading: for each VOBU, read its NAV pack first
+            // to detect interleaved (ILVU) content. If interleaved, only send
+            // VOBUs matching the target angle (determined by the vob_id of the
+            // first VOBU). This prevents duplicate frames from alternate angles
+            // (e.g. "Follow the White Rabbit" on The Matrix).
             let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
 
             tokio::task::spawn_blocking(move || {
-                const CHUNK_BLOCKS: u64 = 512; // 1MB per chunk
                 let mut offset = start_block;
+                // Target vob_id for ILVU filtering — set from the first
+                // VOBU in each interleaved region.
+                let mut target_vob_id: Option<u16> = None;
+                let mut in_ilvu_region = false;
+                let mut skipped_blocks: u64 = 0;
+
                 while offset < end_block {
-                    let count = CHUNK_BLOCKS.min(end_block - offset) as u32;
-                    match dvd_file.read_blocks(offset as u32, count) {
-                        Ok(data) => {
-                            if tx.blocking_send(data).is_err() {
-                                break; // receiver dropped (ffmpeg closed stdin)
-                            }
-                        }
+                    // Read the first sector (NAV pack) of this VOBU
+                    let nav_data = match dvd_file.read_blocks(offset as u32, 1) {
+                        Ok(d) => d,
                         Err(e) => {
-                            tracing::error!("DVDReadBlocks error at block {offset}: {e}");
+                            tracing::error!("DVDReadBlocks NAV error at block {offset}: {e}");
                             break;
                         }
+                    };
+
+                    let (vobu_ea, vob_id, ilvu_flag, _ilvu_ea) =
+                        match parse_nav_pack(&nav_data) {
+                            Some(v) => v,
+                            None => {
+                                // Not a valid NAV pack — read as bulk data
+                                // (shouldn't happen in well-formed VOBs)
+                                if tx.blocking_send(nav_data).is_err() { break; }
+                                offset += 1;
+                                continue;
+                            }
+                        };
+
+                    let vobu_size = vobu_ea as u64 + 1; // vobu_ea is inclusive end offset
+                    let vobu_end = (offset + vobu_size).min(end_block);
+
+                    if ilvu_flag {
+                        if !in_ilvu_region {
+                            // Entering a new interleaved region — the first
+                            // ILVU belongs to our angle. Set target vob_id.
+                            target_vob_id = Some(vob_id);
+                            in_ilvu_region = true;
+                        }
+                        // Skip VOBUs from the alternate angle
+                        if Some(vob_id) != target_vob_id {
+                            skipped_blocks += vobu_size;
+                            offset = vobu_end;
+                            continue;
+                        }
+                    } else {
+                        // Non-ILVU VOBU — reset so we re-detect target
+                        // if we enter another interleaved region later.
+                        in_ilvu_region = false;
                     }
-                    offset += count as u64;
+
+                    // Send the NAV pack we already read
+                    if tx.blocking_send(nav_data).is_err() { break; }
+
+                    // Read and send the rest of the VOBU (sectors after NAV pack)
+                    if vobu_size > 1 {
+                        let rest_count = (vobu_end - offset - 1) as u32;
+                        if rest_count > 0 {
+                            match dvd_file.read_blocks((offset + 1) as u32, rest_count) {
+                                Ok(data) => {
+                                    if tx.blocking_send(data).is_err() { break; }
+                                }
+                                Err(e) => {
+                                    tracing::error!("DVDReadBlocks error at block {}: {e}", offset + 1);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    offset = vobu_end;
+                }
+
+                if skipped_blocks > 0 {
+                    tracing::info!(
+                        "ILVU filtering: skipped {} blocks ({} MB) of alternate-angle data (target vob_id={:?})",
+                        skipped_blocks,
+                        skipped_blocks * 2048 / (1024 * 1024),
+                        target_vob_id
+                    );
                 }
             });
 
@@ -331,4 +432,153 @@ async fn pipe_raw_files(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a synthetic 2048-byte NAV pack sector with the given DSI fields.
+    fn make_nav_sector(vobu_ea: u32, vob_id: u16, category: u16, ilvu_ea: u32) -> Vec<u8> {
+        let mut sector = vec![0u8; 2048];
+        let dsi = 0x407;
+        // vobu_ea at dsi+8
+        sector[dsi + 8..dsi + 12].copy_from_slice(&vobu_ea.to_be_bytes());
+        // vob_id at dsi+24
+        sector[dsi + 24..dsi + 26].copy_from_slice(&vob_id.to_be_bytes());
+        // sml_pbi.category at dsi+32
+        let sml = dsi + 32;
+        sector[sml..sml + 2].copy_from_slice(&category.to_be_bytes());
+        // sml_pbi.ilvu_ea at dsi+34
+        sector[sml + 2..sml + 6].copy_from_slice(&ilvu_ea.to_be_bytes());
+        sector
+    }
+
+    #[test]
+    fn parse_nav_pack_non_ilvu() {
+        let sector = make_nav_sector(157, 3, 0x0000, 0);
+        let (vobu_ea, vob_id, ilvu_flag, ilvu_ea) = parse_nav_pack(&sector).unwrap();
+        assert_eq!(vobu_ea, 157);
+        assert_eq!(vob_id, 3);
+        assert!(!ilvu_flag);
+        assert_eq!(ilvu_ea, 0);
+    }
+
+    #[test]
+    fn parse_nav_pack_ilvu_angle1() {
+        // category 0x6000: ilvu_flag=1, first VOBU of ILVU
+        let sector = make_nav_sector(171, 4, 0x6000, 489);
+        let (vobu_ea, vob_id, ilvu_flag, ilvu_ea) = parse_nav_pack(&sector).unwrap();
+        assert_eq!(vobu_ea, 171);
+        assert_eq!(vob_id, 4);
+        assert!(ilvu_flag);
+        assert_eq!(ilvu_ea, 489);
+    }
+
+    #[test]
+    fn parse_nav_pack_ilvu_angle2() {
+        let sector = make_nav_sector(171, 5, 0x6000, 491);
+        let (vobu_ea, vob_id, ilvu_flag, ilvu_ea) = parse_nav_pack(&sector).unwrap();
+        assert_eq!(vobu_ea, 171);
+        assert_eq!(vob_id, 5);
+        assert!(ilvu_flag);
+        assert_eq!(ilvu_ea, 491);
+    }
+
+    #[test]
+    fn parse_nav_pack_ilvu_middle_and_last() {
+        // 0x4000 = middle of ILVU, 0x5000 = last of ILVU — both have ilvu_flag set
+        for cat in [0x4000u16, 0x5000] {
+            let sector = make_nav_sector(155, 4, cat, 0);
+            let (_vobu_ea, _vob_id, ilvu_flag, _ilvu_ea) = parse_nav_pack(&sector).unwrap();
+            assert!(ilvu_flag, "category 0x{cat:04x} should have ilvu_flag set");
+        }
+    }
+
+    #[test]
+    fn parse_nav_pack_too_small() {
+        let sector = vec![0u8; 1024];
+        assert!(parse_nav_pack(&sector).is_none());
+    }
+
+    #[test]
+    fn parse_nav_pack_real_matrix_values() {
+        // Values observed from actual Matrix DVD Title 8 NAV packs
+        let sector = make_nav_sector(171, 4, 0x6000, 489);
+        let result = parse_nav_pack(&sector).unwrap();
+        assert_eq!(result, (171, 4, true, 489));
+
+        let sector2 = make_nav_sector(171, 5, 0x6000, 491);
+        let result2 = parse_nav_pack(&sector2).unwrap();
+        assert_eq!(result2, (171, 5, true, 491));
+    }
+
+    /// Simulate the ILVU filtering logic from pipe_dvdread using synthetic
+    /// VOBU data. Verifies that alternate-angle VOBUs are skipped while
+    /// non-ILVU and target-angle VOBUs pass through.
+    #[test]
+    fn ilvu_filtering_skips_alternate_angle() {
+        // Simulates The Matrix Title 8 structure:
+        //   VOBU 0: non-ILVU, vob_id=3  (Cell 1)
+        //   VOBU 1: ILVU, vob_id=4      (Cell 2, angle 1)
+        //   VOBU 2: ILVU, vob_id=5      (Cell 2, angle 2 — skip)
+        //   VOBU 3: ILVU, vob_id=4      (Cell 2, angle 1)
+        //   VOBU 4: ILVU, vob_id=5      (Cell 2, angle 2 — skip)
+        //   VOBU 5: non-ILVU, vob_id=4  (Cell 3)
+        let vobus: Vec<(u16, bool)> = vec![
+            (3, false), (4, true), (5, true), (4, true), (5, true), (4, false),
+        ];
+
+        let sent = filter_vobus(&vobus);
+        assert_eq!(sent, vec![3, 4, 4, 4]);
+    }
+
+    /// Verify that separate interleaved regions with different vob_ids
+    /// each get their own target (non-ILVU gap resets target).
+    #[test]
+    fn ilvu_filtering_handles_region_transitions() {
+        let vobus: Vec<(u16, bool)> = vec![
+            (4, true), (5, true),   // Region 1: target=4
+            (6, false),              // Gap resets
+            (7, true), (8, true),   // Region 2: target=7
+        ];
+
+        let sent = filter_vobus(&vobus);
+        assert_eq!(sent, vec![4, 6, 7]);
+    }
+
+    /// All non-ILVU VOBUs should pass through regardless of vob_id.
+    #[test]
+    fn ilvu_filtering_passes_all_non_ilvu() {
+        let vobus: Vec<(u16, bool)> = vec![
+            (1, false), (2, false), (3, false),
+        ];
+
+        let sent = filter_vobus(&vobus);
+        assert_eq!(sent, vec![1, 2, 3]);
+    }
+
+    /// Helper: run the same filtering logic as pipe_dvdread on a list of
+    /// (vob_id, ilvu_flag) pairs, returning the vob_ids that were sent.
+    fn filter_vobus(vobus: &[(u16, bool)]) -> Vec<u16> {
+        let mut sent: Vec<u16> = Vec::new();
+        let mut target_vob_id: Option<u16> = None;
+        let mut in_ilvu_region = false;
+
+        for &(vob_id, ilvu) in vobus {
+            if ilvu {
+                if !in_ilvu_region {
+                    target_vob_id = Some(vob_id);
+                    in_ilvu_region = true;
+                }
+                if Some(vob_id) != target_vob_id {
+                    continue;
+                }
+            } else {
+                in_ilvu_region = false;
+            }
+            sent.push(vob_id);
+        }
+        sent
+    }
 }

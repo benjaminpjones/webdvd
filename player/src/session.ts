@@ -28,6 +28,7 @@ export interface PlaybackTarget {
   part: number;
   seekTimeMs?: number;
   sector?: number; // VOB-absolute sector for sector-based seeking
+  lastSector?: number; // VOB-absolute last sector of PGC (bounds the read)
 }
 
 export type SessionState = "idle" | "loading" | "playing" | "menu" | "stopped";
@@ -152,7 +153,7 @@ export class SessionManager {
     this.setState("loading");
     this.log(`Selecting title ${title}...`);
     this.session.titlePlay(title);
-    const target = await this.driveVM();
+    const target = await this.driveVM(true, false, title);
     if (target) {
       this.playTarget(target);
     } else if (this._state !== "menu") {
@@ -161,7 +162,11 @@ export class SessionManager {
       const titleInfo = this.structure.titles.find((t) => t.title === title);
       if (titleInfo?.vts) {
         this.log(`VM fallback: playing VTS ${titleInfo.vts} for title ${title}`);
-        this.playTarget({ vts: titleInfo.vts, title, part: 1 });
+        this.playTarget({
+          vts: titleInfo.vts, title, part: 1,
+          sector: titleInfo.firstSector,
+          lastSector: titleInfo.lastSector,
+        });
       }
     }
   }
@@ -183,7 +188,7 @@ export class SessionManager {
     this.setState("loading");
     this.log(`Navigating to title ${title} chapter ${chapter}...`);
     this.session.partPlay(title, chapter);
-    const target = await this.driveVM();
+    const target = await this.driveVM(true, false, title);
     if (target) {
       this.playTarget(target);
     }
@@ -333,7 +338,7 @@ export class SessionManager {
    * Yields to the browser event loop periodically to avoid blocking UI.
    * @param acceptTitles If false, skip VTS title cells (for First Play navigation).
    */
-  private async driveVM(acceptTitles = true, postActivation = false): Promise<PlaybackTarget | null> {
+  private async driveVM(acceptTitles = true, postActivation = false, requestedTitle?: number): Promise<PlaybackTarget | null> {
     let clut: number[] = [];
     let lastMenuSector = 0;       // Track last menu cell's VOB-absolute sector
     let lastMenuLastSector = 0;   // Track last menu cell's VOB-absolute last sector
@@ -378,12 +383,20 @@ export class SessionManager {
           // VTS_CHANGE updates currentVts during the loop, so checking
           // currentVts would always match after a VTS transition.
           if (vts !== startVts) {
-            // Look up which title is in this VTS from disc structure
-            const titleInfo = this.structure.titles.find((t) => t.vts === vts);
+            // Look up which title is in this VTS from disc structure.
+            // If we know the requested title, use it (avoids ambiguity
+            // when multiple titles share a VTS).
+            const titleInfo = requestedTitle
+              ? this.structure.titles.find((t) => t.title === requestedTitle)
+              : this.structure.titles.find((t) => t.vts === vts);
             const title = titleInfo?.title ?? 1;
             this.log(`Falling back to direct transcode of VTS ${vts} (title ${title})`);
             this.currentVts = vts;
-            return { vts, title, part: 1 };
+            return {
+              vts, title, part: 1,
+              sector: titleInfo?.firstSector,
+              lastSector: titleInfo?.lastSector,
+            };
           }
           this.log(`Sub-menu needs VTS ${vts} title VOBs (not in MEMFS) — cannot navigate`);
         }
@@ -403,6 +416,7 @@ export class SessionManager {
                 title: ev.title,
                 part: ev.part ?? 1,
                 sector: ev.firstSector,
+                lastSector: ev.pgcLastSector,
               };
             }
             // During First Play navigation, skip title cells — the VM
@@ -571,13 +585,19 @@ export class SessionManager {
     this.currentPart = target.part;
     const vts = target.vts;
 
-    this.log(`Playing VTS ${vts} (title ${target.title}, chapter ${target.part}, sector=${target.sector ?? 0})`);
+    this.log(`Playing VTS ${vts} (title ${target.title}, chapter ${target.part}, sector=${target.sector ?? 0}, lastSector=${target.lastSector ?? 0})`);
     this.setState("loading");
 
     let url = `/api/transcode/${vts}`;
+    const params = new URLSearchParams();
     if (target.sector && target.sector > 0) {
-      url += `?sector=${target.sector}`;
+      params.set("sector", String(target.sector));
     }
+    if (target.lastSector && target.lastSector > 0) {
+      params.set("lastSector", String(target.lastSector));
+    }
+    const qs = params.toString();
+    if (qs) url += `?${qs}`;
     this.video.src = url;
     this.video.muted = false; // unmute for title playback
     this.video.loop = false; // titles don't loop — onended resumes VM

@@ -87,6 +87,7 @@ export interface NavEvent {
   cellStartSectors?: number;
   firstSector?: number;  // VOB-absolute first sector of the cell
   lastSector?: number;   // VOB-absolute last sector of the cell
+  pgcLastSector?: number; // VOB-absolute last sector of the PGC's final cell
   title?: number;
   part?: number;
   isVts?: boolean;
@@ -129,6 +130,8 @@ export interface TitleInfo {
   chapterTimesMs: number[];
   vts: number;       // VTS (titleset) number this title belongs to
   vtsTtn: number;    // title number within the VTS
+  firstSector: number;  // VOB-absolute first sector of PGC's first cell
+  lastSector: number;   // VOB-absolute last sector of PGC's last cell
 }
 
 export interface AudioStream {
@@ -415,6 +418,8 @@ function queryStructure(dvd: DvdnavBindings): DiscStructure {
       chapterTimesMs: info.chapter_times_ms,
       vts: info.vts,
       vtsTtn: info.vts_ttn,
+      firstSector: info.firstSector ?? 0,
+      lastSector: info.lastSector ?? 0,
     });
   }
 
@@ -525,6 +530,7 @@ export class DvdSession {
     if (raw.cellStartSectors !== undefined) ev.cellStartSectors = raw.cellStartSectors;
     if (raw.firstSector !== undefined) ev.firstSector = raw.firstSector;
     if (raw.lastSector !== undefined) ev.lastSector = raw.lastSector;
+    if (raw.pgcLastSector !== undefined) ev.pgcLastSector = raw.pgcLastSector;
     if (raw.title !== undefined) ev.title = raw.title;
     if (raw.part !== undefined) ev.part = raw.part;
     if (raw.isVts !== undefined) ev.isVts = !!raw.isVts;

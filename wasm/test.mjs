@@ -84,7 +84,7 @@ async function main() {
   // Test structure queries
   console.log("\nDisc structure:");
   const numTitles = dvd.getNumTitles();
-  assert(numTitles === 3, `has 3 titles (got ${numTitles})`);
+  assert(numTitles === 4, `has 4 titles (got ${numTitles})`);
 
   const numParts1 = dvd.getNumParts(1);
   assert(numParts1 === 2, `title 1 has 2 chapters (got ${numParts1})`);
@@ -168,7 +168,7 @@ async function main() {
       const btns = JSON.parse(getButtons());
       if (btns.length > 0) {
         foundMenu = true;
-        assert(btns.length === 3, `root menu has 3 buttons (got ${btns.length})`);
+        assert(btns.length === 4, `root menu has 4 buttons (got ${btns.length})`);
         break;
       }
     }
