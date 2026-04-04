@@ -117,7 +117,7 @@ cd player && npm test
 
 This catches regressions in the WASM glue, VM navigation, menu interaction, server transcoding, and video playback. The e2e suite covers disc structure, menu loading, button highlights, sub-menu navigation, title playback from menus, and title switching.
 
-The test disc includes a VMGM root menu (3 buttons: Title 1, Title 2, Chapters) and a VTS chapters sub-menu (3 buttons: Chapter 1, Chapter 2, Main Menu), exercising the full menu↔title flow.
+The test disc includes a VMGM root menu (4 buttons: Title 1, Title 2, Title 4, Chapters) and a VTS chapters sub-menu (3 buttons: Chapter 1, Chapter 2, Main Menu), exercising the full menu↔title flow. Title 4 shares a VTS with Title 2 (two PGCs in one titleset), testing that PGC sector bounds are propagated correctly when a title doesn't start at sector 0.
 
 CI runs the WASM smoke test on every push/PR via GitHub Actions. The smoke test covers VM navigation (the event loop reaches a CELL_CHANGE in VTS domain) but does not test the full browser playback pipeline — that's what the local e2e test is for.
 
@@ -126,7 +126,7 @@ CI runs the WASM smoke test on every push/PR via GitHub Actions. The smoke test 
 ```
 server/              Rust server (axum) — VIDEO_TS serving + streaming ffmpeg transcode
   src/api.rs         HTTP endpoints (/api/disc, /api/transcode, /api/ifo/*, /api/vob/*, /api/vob-range/*)
-  src/transcode.rs   ffmpeg spawn + streaming fMP4 output
+  src/transcode.rs   ffmpeg spawn + streaming fMP4 output + ILVU filtering
   src/disc.rs        VIDEO_TS directory scanner
 player/              TypeScript + Vite browser app
   src/main.ts        App entry point — auto-play via SessionManager
@@ -170,7 +170,11 @@ After a button is activated, the VM re-enters its event loop. The first few even
 
 ### Sector-based seeking
 
-Chapter and menu cell playback use VOB-absolute sector offsets from the IFO cell_playback table rather than time-based seeking. The server finds which VOB file contains the start sector, seeks to the byte offset, and reads across VOB file boundaries as needed. For menu cells that share a VOB with other cells, `lastSector` limits the read range to prevent bleeding into adjacent cells.
+Chapter and menu cell playback use VOB-absolute sector offsets from the IFO cell_playback table rather than time-based seeking. The server finds which VOB file contains the start sector, seeks to the byte offset, and reads across VOB file boundaries as needed. For menu cells that share a VOB with other cells, `lastSector` limits the read range to prevent bleeding into adjacent cells. For multi-PGC titlesets (where multiple titles share a VOB), the PGC's last cell sector (`pgcLastSector`) bounds the read so one title's transcode doesn't bleed into another's data.
+
+### ILVU (interleaved multi-angle) filtering
+
+Some DVDs interleave multiple angles at the VOBU level within a single VOB — each VOBU is tagged with a `vob_id` identifying its angle. Without filtering, all angles are transcoded together, causing duplicate MPEG-2 PTS timestamps and visible half-second repeats in playback. The server parses NAV packs (DSI structure) from each VOBU to extract `vob_id` and ILVU flags, then filters to only the target angle's VOBUs. The first ILVU VOBU encountered sets the target `vob_id`; subsequent VOBUs with different `vob_id`s are skipped. Non-ILVU regions pass through unfiltered.
 
 ### Latency
 
@@ -211,7 +215,8 @@ Chapter and menu cell playback use VOB-absolute sector offsets from the IFO cell
 - [ ] Subtitle rendering during playback
 - [ ] Audio/subtitle stream switching
 - [ ] Seamless VOB boundary transitions
-- [ ] Multi-angle support
+- [x] Multi-angle ILVU filtering (server skips alternate-angle VOBUs during transcode)
+- [ ] Multi-angle UI (angle selection, explicit angle switching)
 - [ ] Disc library / collection view
 
 ## Prior Art & References
