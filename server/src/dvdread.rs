@@ -176,6 +176,60 @@ impl DvdReader {
     }
 }
 
+/// Handle to an open DVD file for chunked block reads.
+/// Must be used from a single thread (not Send).
+pub struct DvdFile {
+    file: *mut DvdFileT,
+    total_blocks: usize,
+}
+
+impl DvdFile {
+    pub fn total_blocks(&self) -> usize {
+        self.total_blocks
+    }
+
+    /// Read `block_count` blocks starting at `offset`. Returns the data read.
+    pub fn read_blocks(&self, offset: u32, block_count: u32) -> anyhow::Result<Vec<u8>> {
+        let mut buf = vec![0u8; block_count as usize * DVD_VIDEO_LB_LEN];
+        let blocks = unsafe {
+            DVDReadBlocks(self.file, offset as _, block_count as usize, buf.as_mut_ptr())
+        };
+        if blocks < 0 {
+            anyhow::bail!("DVDReadBlocks failed (offset={offset}, count={block_count})");
+        }
+        buf.truncate(blocks as usize * DVD_VIDEO_LB_LEN);
+        Ok(buf)
+    }
+}
+
+impl Drop for DvdFile {
+    fn drop(&mut self) {
+        if !self.file.is_null() {
+            unsafe { DVDCloseFile(self.file) };
+        }
+    }
+}
+
+// Safety: same reasoning as DvdReader — protected by Mutex
+unsafe impl Send for DvdFile {}
+
+impl DvdReader {
+    /// Open a DVD file for chunked reading. Returns a handle that can
+    /// read blocks incrementally without loading the entire file.
+    pub fn open_file(&self, titlenum: i32, domain: DvdReadDomain) -> anyhow::Result<DvdFile> {
+        let file = unsafe { DVDOpenFile(self.handle, titlenum as _, domain) };
+        if file.is_null() {
+            anyhow::bail!("DVDOpenFile failed (titlenum={titlenum})");
+        }
+        let size = unsafe { DVDFileSize(file) };
+        if size < 0 {
+            unsafe { DVDCloseFile(file) };
+            anyhow::bail!("DVDFileSize failed (titlenum={titlenum})");
+        }
+        Ok(DvdFile { file, total_blocks: size as usize })
+    }
+}
+
 impl Drop for DvdReader {
     fn drop(&mut self) {
         if !self.handle.is_null() {

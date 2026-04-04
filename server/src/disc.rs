@@ -247,6 +247,19 @@ impl Disc {
         Some(reader.read_vob_blocks(titlenum, domain, start_block, block_count))
     }
 
+    /// Open a DVD file for chunked block reading via dvdread.
+    /// Returns None if dvdread is unavailable.
+    #[cfg(has_dvdread)]
+    pub fn open_dvd_file(
+        &self,
+        titlenum: i32,
+        domain: dvdread::DvdReadDomain,
+    ) -> Option<anyhow::Result<dvdread::DvdFile>> {
+        let dvdread_mutex = self.dvdread.as_ref()?;
+        let reader = dvdread_mutex.lock().unwrap();
+        Some(reader.open_file(titlenum, domain))
+    }
+
     /// Whether libdvdread is active for this disc.
     pub fn has_dvdread(&self) -> bool {
         #[cfg(has_dvdread)]

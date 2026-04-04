@@ -156,6 +156,9 @@ pub async fn transcode_to_stream(
 }
 
 /// Pipe VOB data through libdvdread (CSS-decrypted) to ffmpeg stdin.
+///
+/// Reads in chunks via a channel to avoid loading multi-GB title VOBs
+/// into memory at once.
 async fn pipe_dvdread(
     disc: &Arc<Disc>,
     titleset: u32,
@@ -164,6 +167,73 @@ async fn pipe_dvdread(
     last_sector: Option<u64>,
     stdin: &mut tokio::process::ChildStdin,
 ) -> anyhow::Result<()> {
+    #[cfg(has_dvdread)]
+    {
+        use crate::dvdread::DvdReadDomain;
+        let domain = if is_menu {
+            DvdReadDomain::MenuVobs
+        } else {
+            DvdReadDomain::TitleVobs
+        };
+
+        if let Some(dvd_file_result) = disc.open_dvd_file(titleset as i32, domain) {
+            let dvd_file = dvd_file_result?;
+            let total_blocks = dvd_file.total_blocks() as u64;
+
+            let start_block = sector.unwrap_or(0);
+            let end_block = match last_sector {
+                Some(last) => (last + 1).min(total_blocks),
+                None => total_blocks,
+            };
+
+            if start_block >= end_block {
+                return Ok(());
+            }
+
+            let remaining = end_block - start_block;
+            tracing::info!(
+                "Streaming {} blocks ({} MB) of decrypted VOB data to ffmpeg",
+                remaining,
+                remaining * 2048 / (1024 * 1024),
+            );
+
+            // Read blocks in a blocking task, send chunks through a channel
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+
+            tokio::task::spawn_blocking(move || {
+                const CHUNK_BLOCKS: u64 = 512; // 1MB per chunk
+                let mut offset = start_block;
+                while offset < end_block {
+                    let count = CHUNK_BLOCKS.min(end_block - offset) as u32;
+                    match dvd_file.read_blocks(offset as u32, count) {
+                        Ok(data) => {
+                            if tx.blocking_send(data).is_err() {
+                                break; // receiver dropped (ffmpeg closed stdin)
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("DVDReadBlocks error at block {offset}: {e}");
+                            break;
+                        }
+                    }
+                    offset += count as u64;
+                }
+            });
+
+            let mut total_bytes: u64 = 0;
+            while let Some(chunk) = rx.recv().await {
+                total_bytes += chunk.len() as u64;
+                if stdin.write_all(&chunk).await.is_err() {
+                    break; // ffmpeg closed
+                }
+            }
+
+            tracing::info!("Piped {} bytes total to ffmpeg", total_bytes);
+            return Ok(());
+        }
+    }
+
+    // Fallback: raw file read (no dvdread)
     let disc = disc.clone();
     let vob_name = if is_menu {
         if titleset == 0 {
@@ -175,55 +245,11 @@ async fn pipe_dvdread(
         format!("VTS_{:02}_1.VOB", titleset)
     };
 
-    // Read through dvdread in a blocking task
     let data = tokio::task::spawn_blocking(move || {
-        if let Some(start_sector) = sector {
-            // Sector-based read: only the requested range
-            let block_count = match last_sector {
-                Some(last) => (last - start_sector + 1) as u32,
-                None => {
-                    // Read from start_sector to end of file — get file size first
-                    // and compute remaining blocks. Fall back to reading the whole file.
-                    let full = disc.read_file(&vob_name)?;
-                    let total_blocks = (full.len() / 2048) as u64;
-                    if start_sector >= total_blocks {
-                        return Ok(Vec::new());
-                    }
-                    (total_blocks - start_sector) as u32
-                }
-            };
+        disc.read_file(&vob_name)
+    }).await??;
 
-            #[cfg(has_dvdread)]
-            {
-                use crate::dvdread::DvdReadDomain;
-                let domain = if is_menu {
-                    DvdReadDomain::MenuVobs
-                } else {
-                    DvdReadDomain::TitleVobs
-                };
-                if let Some(result) = disc.read_vob_blocks(
-                    titleset as i32,
-                    domain,
-                    start_sector as u32,
-                    block_count,
-                ) {
-                    return result;
-                }
-            }
-
-            // Fallback: slice from full file read
-            let full = disc.read_file(&vob_name)?;
-            let start = start_sector as usize * 2048;
-            let end = (start + block_count as usize * 2048).min(full.len());
-            Ok(full[start..end].to_vec())
-        } else {
-            // No sector offset: read the whole file
-            disc.read_file(&vob_name)
-        }
-    })
-    .await??;
-
-    tracing::info!("Piping {} bytes of decrypted VOB data to ffmpeg", data.len());
+    tracing::info!("Piping {} bytes of VOB data to ffmpeg", data.len());
     stdin.write_all(&data).await?;
     Ok(())
 }
