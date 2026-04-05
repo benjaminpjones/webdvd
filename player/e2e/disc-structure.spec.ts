@@ -101,7 +101,7 @@ test.describe("DVD menu navigation", () => {
 
     const video = page.locator("#video");
     const src = await video.getAttribute("src");
-    expect(src).toContain("/api/transcode/");
+    expect(src).toContain("/transcode/");
   });
 
   test("sub-menu navigation and return to main", async ({ page }) => {
@@ -161,7 +161,7 @@ test.describe("DVD menu navigation", () => {
 
     const video = page.locator("#video");
     const src = await video.getAttribute("src");
-    expect(src).toContain("/api/transcode/");
+    expect(src).toContain("/transcode/");
   });
 
   test("VTS menu VOBs are loaded before dvd_open", async ({ page }) => {
@@ -197,7 +197,7 @@ test.describe("DVD menu navigation", () => {
 
     const video = page.locator("#video");
     const src = await video.getAttribute("src");
-    expect(src).toContain("/api/transcode/3");
+    expect(src).toContain("/transcode/3");
 
     const state = await video.evaluate((v: HTMLVideoElement) => ({
       paused: v.paused,
@@ -229,7 +229,7 @@ test.describe("DVD menu navigation", () => {
     const video = page.locator("#video");
     const src = await video.getAttribute("src");
     // Should transcode VTS 2 with both sector and lastSector params
-    expect(src).toContain("/api/transcode/2");
+    expect(src).toContain("/transcode/2");
     expect(src).toMatch(/sector=\d+/);
     expect(src).toMatch(/lastSector=\d+/);
 

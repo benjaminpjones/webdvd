@@ -2,6 +2,7 @@ mod api;
 mod disc;
 #[cfg(has_dvdread)]
 mod dvdread;
+mod library;
 mod transcode;
 
 use clap::Parser;
@@ -11,8 +12,8 @@ use std::sync::Arc;
 #[derive(Parser)]
 #[command(name = "webdvd", about = "Web-based DVD player server")]
 struct Args {
-    /// Path to VIDEO_TS directory
-    video_ts: PathBuf,
+    /// Path to DVD library root (contains folders with VIDEO_TS subdirectories)
+    root: PathBuf,
 
     /// Port to listen on
     #[arg(short, long, default_value = "3000")]
@@ -21,7 +22,7 @@ struct Args {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub disc: Arc<disc::Disc>,
+    pub library: Arc<library::Library>,
 }
 
 #[tokio::main]
@@ -30,16 +31,23 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    let disc = disc::Disc::open(&args.video_ts)?;
+    let lib = library::Library::scan(&args.root)?;
     tracing::info!(
-        "Opened VIDEO_TS at {} ({} VTS files, {} VOB files)",
-        args.video_ts.display(),
-        disc.vts_count(),
-        disc.vob_count(),
+        "Opened library at {} ({} disc(s))",
+        args.root.display(),
+        lib.discs.len(),
     );
+    for (slug, disc) in &lib.discs {
+        tracing::info!(
+            "  {} — {} VTS, {} VOBs",
+            slug,
+            disc.vts_count(),
+            disc.vob_count(),
+        );
+    }
 
     let state = AppState {
-        disc: Arc::new(disc),
+        library: Arc::new(lib),
     };
 
     let app = api::router(state);

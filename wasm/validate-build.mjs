@@ -16,7 +16,7 @@ import { join } from "path";
 const require = createRequire(import.meta.url);
 
 // Default test disc location
-const videoTsDir = process.argv[2] || "/tmp/webdvd-test/VIDEO_TS";
+const videoTsDir = process.argv[2] || "/tmp/webdvd-test/Test Disc/VIDEO_TS";
 
 // Load the Emscripten factory
 const createModule = require("./build/dvdnav.js");

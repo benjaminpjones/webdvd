@@ -1,6 +1,6 @@
 import { defineConfig } from "@playwright/test";
 
-const testDisc = process.env.WEBDVD_TEST_DISC ?? "/tmp/webdvd-test/VIDEO_TS";
+const testDisc = process.env.WEBDVD_TEST_DISC ?? "/tmp/webdvd-test";
 const serverBin = process.env.WEBDVD_SERVER_BIN;
 const serverCommand = serverBin
   ? `${serverBin} ${testDisc}`
@@ -13,9 +13,7 @@ export default defineConfig({
     baseURL: "http://localhost:5188",
     headless: true,
   },
-  projects: [
-    { name: "chromium", use: { browserName: "chromium" } },
-  ],
+  projects: [{ name: "chromium", use: { browserName: "chromium" } }],
   // Vite dev server — Playwright starts this automatically
   webServer: [
     {

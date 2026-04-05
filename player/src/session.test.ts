@@ -129,6 +129,7 @@ const DISC: DiscStructure = {
 function createMockSession(events: NavEvent[]) {
   const eventQueue = [...events];
   return {
+    slug: "test-disc",
     getNextEvent: vi.fn(() => eventQueue.shift() ?? evt.stop()),
     titlePlay: vi.fn(),
     partPlay: vi.fn(),
@@ -239,7 +240,7 @@ describe("SessionManager", () => {
       await sm.start();
 
       expect(sm.state).toBe("loading");
-      expect(video.src).toContain("/api/transcode/1");
+      expect(video.src).toContain("/api/disc/test-disc/transcode/1");
     });
 
     test("reaches stopped state when VM produces only STOP", async () => {
@@ -262,7 +263,7 @@ describe("SessionManager", () => {
       await sm.selectTitle(1);
 
       expect(session.titlePlay).toHaveBeenCalledWith(1);
-      expect(video.src).toContain("/api/transcode/1");
+      expect(video.src).toContain("/api/disc/test-disc/transcode/1");
       expect(video.src).toContain("sector=100");
     });
 
@@ -274,7 +275,7 @@ describe("SessionManager", () => {
 
       await sm.selectTitle(2);
 
-      expect(video.src).toContain("/api/transcode/2");
+      expect(video.src).toContain("/api/disc/test-disc/transcode/2");
       expect(video.src).toContain("sector=200");
     });
 
@@ -287,7 +288,7 @@ describe("SessionManager", () => {
       await sm.selectTitle(1);
 
       // Should fall back to direct transcode using structure
-      expect(video.src).toContain("/api/transcode/1");
+      expect(video.src).toContain("/api/disc/test-disc/transcode/1");
     });
   });
 
@@ -339,7 +340,7 @@ describe("SessionManager", () => {
       await sm.menuActivate();
 
       expect(session.buttonActivate).toHaveBeenCalled();
-      expect(video.src).toContain("/api/transcode/1");
+      expect(video.src).toContain("/api/disc/test-disc/transcode/1");
     });
 
     test("menuActivate stays in menu when activation fails", async () => {
@@ -468,7 +469,7 @@ describe("SessionManager", () => {
 
       await sm.selectTitle(1);
 
-      expect(video.src).toContain("/api/transcode/1");
+      expect(video.src).toContain("/api/disc/test-disc/transcode/1");
       expect(video.src).toContain("sector=150");
       expect(video.src).toContain("lastSector=999");
       expect(sm.title).toBe(1);

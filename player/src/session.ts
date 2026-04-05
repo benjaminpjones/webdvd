@@ -48,6 +48,7 @@ export class SessionManager {
   private session: DvdSession;
   private video: HTMLVideoElement;
   private structure: DiscStructure;
+  private apiBase: string;
   private currentVts = 0;
   private currentTitle = 0;
   private currentPart = 0;
@@ -72,6 +73,7 @@ export class SessionManager {
     this.session = session;
     this.video = video;
     this.structure = structure;
+    this.apiBase = `/api/disc/${encodeURIComponent(session.slug)}`;
     this.onStateChange = opts?.onStateChange ?? null;
     this.onMenuChange = opts?.onMenuChange ?? null;
     this.onLog = opts?.onLog ?? null;
@@ -370,7 +372,7 @@ export class SessionManager {
    * position so sub-menus (e.g. Scene Selection) show the correct video.
    */
   private loadMenuVideo(): void {
-    let url = `/api/transcode-menu/${this.currentVts}`;
+    let url = `${this.apiBase}/transcode-menu/${this.currentVts}`;
     const params = new URLSearchParams();
     if (this.menuFirstSector > 0) {
       params.set("sector", String(this.menuFirstSector));
@@ -672,7 +674,7 @@ export class SessionManager {
     );
     this.setState("loading");
 
-    let url = `/api/transcode/${vts}`;
+    let url = `${this.apiBase}/transcode/${vts}`;
     const params = new URLSearchParams();
     if (target.sector && target.sector > 0) {
       params.set("sector", String(target.sector));

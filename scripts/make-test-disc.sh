@@ -20,7 +20,8 @@ set -euo pipefail
 # Each title has text overlays explaining what it tests and what a bug looks like.
 # Menus have visible button labels.
 
-OUT_DIR="${1:-/tmp/webdvd-test}"
+LIBRARY_ROOT="${1:-/tmp/webdvd-test}"
+OUT_DIR="$LIBRARY_ROOT/Test Disc"
 WORK_DIR="$(mktemp -d)"
 
 cleanup() {
@@ -314,5 +315,5 @@ echo "  Title 4 (VTS 3): 6s, red test pattern, 1 chapter (660Hz tone)"
 echo "  First Play → Root Menu"
 echo ""
 echo "Test with:"
-echo "  cd server && cargo run -- $OUT_DIR/VIDEO_TS"
+echo "  cd server && cargo run -- $LIBRARY_ROOT"
 ls -la "$OUT_DIR/VIDEO_TS/"

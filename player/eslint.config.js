@@ -27,6 +27,6 @@ export default tseslint.config(
     ...tseslint.configs.disableTypeChecked,
   },
   {
-    ignores: ["dist/", "node_modules/", "eslint.config.js", "e2e/"],
+    ignores: ["dist/", "node_modules/", "eslint.config.js", "e2e/", "playwright.config.ts"],
   },
 );

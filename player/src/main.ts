@@ -3,15 +3,121 @@ import { initSession, type DiscStructure } from "./dvdnav";
 import { SessionManager } from "./session";
 import { MenuOverlay } from "./overlay";
 
-const video = document.getElementById("video") as HTMLVideoElement;
-const overlay = document.getElementById("overlay") as HTMLCanvasElement;
-const discInfoEl = document.getElementById("disc-info")!;
-const titleSelectEl = document.getElementById("title-select")!;
-const discStructureEl = document.getElementById("disc-structure")!;
-const statusEl = document.getElementById("status")!;
-const remoteEl = document.getElementById("remote")!;
+/* --- Library types --- */
+interface LibraryDisc {
+  slug: string;
+  title: string;
+}
 
-const menuOverlay = new MenuOverlay(overlay);
+/* --- DOM refs --- */
+const appEl = document.getElementById("app")!;
+
+/* --- Library view --- */
+
+function showLibrary(discs: LibraryDisc[]) {
+  appEl.innerHTML = "";
+  appEl.className = "library-view";
+
+  const heading = document.createElement("h1");
+  heading.textContent = "webdvd";
+  heading.className = "library-heading";
+  appEl.appendChild(heading);
+
+  const grid = document.createElement("div");
+  grid.className = "library-grid";
+  appEl.appendChild(grid);
+
+  for (const disc of discs) {
+    const card = document.createElement("button");
+    card.className = "disc-card";
+    card.addEventListener("click", () => {
+      location.hash = `#/disc/${encodeURIComponent(disc.slug)}`;
+    });
+
+    const thumb = document.createElement("div");
+    thumb.className = "disc-thumb";
+    thumb.textContent = "\uD83D\uDCC0"; // disc emoji as placeholder
+    card.appendChild(thumb);
+
+    const title = document.createElement("div");
+    title.className = "disc-title";
+    title.textContent = disc.title;
+    card.appendChild(title);
+
+    grid.appendChild(card);
+  }
+}
+
+/* --- Player view --- */
+
+function showPlayer(): {
+  video: HTMLVideoElement;
+  overlay: HTMLCanvasElement;
+  discInfoEl: HTMLElement;
+  titleSelectEl: HTMLElement;
+  discStructureEl: HTMLElement;
+  statusEl: HTMLElement;
+  remoteEl: HTMLElement;
+} {
+  appEl.innerHTML = "";
+  appEl.className = "";
+
+  // Back button
+  const backBtn = document.createElement("button");
+  backBtn.className = "back-btn";
+  backBtn.textContent = "\u2190 Library";
+  backBtn.addEventListener("click", () => {
+    location.hash = "#/";
+  });
+  appEl.appendChild(backBtn);
+
+  const playerContainer = document.createElement("div");
+  playerContainer.id = "player-container";
+  const video = document.createElement("video");
+  video.id = "video";
+  video.controls = true;
+  const overlay = document.createElement("canvas");
+  overlay.id = "overlay";
+  playerContainer.appendChild(video);
+  playerContainer.appendChild(overlay);
+  appEl.appendChild(playerContainer);
+
+  const remote = document.createElement("div");
+  remote.id = "remote";
+  remote.innerHTML = `
+    <div class="remote-nav">
+      <button data-dir="up" aria-label="Up" title="Up">&#9650;</button>
+      <div class="remote-row">
+        <button data-dir="left" aria-label="Left" title="Left">&#9664;</button>
+        <button data-action="enter" aria-label="Enter" title="Enter">OK</button>
+        <button data-dir="right" aria-label="Right" title="Right">&#9654;</button>
+      </div>
+      <button data-dir="down" aria-label="Down" title="Down">&#9660;</button>
+    </div>
+    <button data-action="menu" class="remote-menu-btn" title="Return to Menu">Menu</button>
+  `;
+  appEl.appendChild(remote);
+
+  const controls = document.createElement("div");
+  controls.id = "controls";
+  controls.innerHTML = `
+    <div id="disc-info">Loading disc info...</div>
+    <div id="status"></div>
+    <div id="title-select"></div>
+    <div id="disc-structure">Loading disc structure (WASM)...</div>
+  `;
+  appEl.appendChild(controls);
+
+  return {
+    video,
+    overlay,
+    discInfoEl: controls.querySelector("#disc-info")!,
+    titleSelectEl: controls.querySelector("#title-select")!,
+    discStructureEl: controls.querySelector("#disc-structure")!,
+    statusEl: controls.querySelector("#status")!,
+    remoteEl: remote,
+  };
+}
 
 function formatDuration(ms: number): string {
   const totalSec = Math.floor(ms / 1000);
@@ -22,7 +128,7 @@ function formatDuration(ms: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-function displayDiscStructure(structure: DiscStructure) {
+function displayDiscStructure(el: HTMLElement, structure: DiscStructure) {
   const lines: string[] = [];
 
   if (structure.titleString) {
@@ -61,43 +167,39 @@ function displayDiscStructure(structure: DiscStructure) {
     lines.push(`Title ${t.title}: ${t.chapters} chapter(s), ${duration}${angles}`);
   }
 
-  discStructureEl.innerHTML = lines.join("<br>");
+  el.innerHTML = lines.join("<br>");
 }
 
-function buildTitleButtons(structure: DiscStructure, sm: SessionManager) {
-  titleSelectEl.innerHTML = "";
+function buildTitleButtons(el: HTMLElement, structure: DiscStructure, sm: SessionManager) {
+  el.innerHTML = "";
 
   for (const t of structure.titles) {
-    // Title button
     const titleBtn = document.createElement("button");
     titleBtn.className = "title-btn";
     titleBtn.setAttribute("data-title", String(t.title));
     titleBtn.textContent = `Title ${t.title} (${formatDuration(t.durationMs)})`;
     titleBtn.addEventListener("click", () => void sm.selectTitle(t.title));
-    titleSelectEl.appendChild(titleBtn);
+    el.appendChild(titleBtn);
   }
 }
 
-function setupRemote(sm: SessionManager) {
-  // Arrow buttons
+function setupRemote(remoteEl: HTMLElement, sm: SessionManager) {
   for (const dir of ["up", "down", "left", "right"] as const) {
     const btn = remoteEl.querySelector(`[data-dir="${dir}"]`);
     btn?.addEventListener("click", () => sm.menuNavigate(dir));
   }
 
-  // Enter button
   remoteEl.querySelector("[data-action='enter']")?.addEventListener("click", () => {
     void sm.menuActivate();
   });
 
-  // Menu button (return to root menu, DVD_MENU_Root = 3)
   remoteEl.querySelector("[data-action='menu']")?.addEventListener("click", () => {
     void sm.returnToMenu();
   });
 }
 
 function setupKeyboard(sm: SessionManager) {
-  document.addEventListener("keydown", (e) => {
+  const handler = (e: KeyboardEvent) => {
     if (sm.state !== "menu") return;
 
     switch (e.key) {
@@ -122,10 +224,16 @@ function setupKeyboard(sm: SessionManager) {
         void sm.menuActivate();
         break;
     }
-  });
+  };
+  document.addEventListener("keydown", handler);
+  return handler;
 }
 
-function setupOverlayMouse(sm: SessionManager) {
+function setupOverlayMouse(
+  overlay: HTMLCanvasElement,
+  menuOverlay: MenuOverlay,
+  sm: SessionManager,
+) {
   overlay.addEventListener("click", (e) => {
     if (sm.state !== "menu") return;
     const pt = menuOverlay.screenToDvd(e.clientX, e.clientY);
@@ -140,7 +248,6 @@ function setupOverlayMouse(sm: SessionManager) {
     if (sm.state !== "menu") return;
     const pt = menuOverlay.screenToDvd(e.clientX, e.clientY);
     if (pt) {
-      // Log every 30th hover to avoid spam
       if (hoverLog++ % 30 === 0) {
         const rect = overlay.getBoundingClientRect();
         console.log(
@@ -152,16 +259,21 @@ function setupOverlayMouse(sm: SessionManager) {
   });
 }
 
-async function init() {
+async function openDisc(slug: string) {
+  const { video, overlay, discInfoEl, titleSelectEl, discStructureEl, statusEl, remoteEl } =
+    showPlayer();
+
+  const menuOverlay = new MenuOverlay(overlay);
+
   try {
     statusEl.textContent = "Loading WASM module...";
 
-    const session = await initSession();
+    const session = await initSession(slug);
     const structure = session.getDiscStructure();
 
     console.log("[dvdnav] Disc structure:", structure);
-    displayDiscStructure(structure);
-    discInfoEl.textContent = `${structure.titleString || "DVD"} — ${structure.titles.length} title(s)`;
+    displayDiscStructure(discStructureEl, structure);
+    discInfoEl.textContent = `${structure.titleString || slug} — ${structure.titles.length} title(s)`;
 
     const sm = new SessionManager(session, video, structure, {
       onStateChange: (state) => {
@@ -176,7 +288,6 @@ async function init() {
                   ? "Stopped"
                   : "";
 
-        // Toggle overlay interactivity in menu state
         const inMenu = state === "menu";
         overlay.style.pointerEvents = inMenu ? "auto" : "none";
         overlay.style.cursor = inMenu ? "pointer" : "default";
@@ -191,19 +302,17 @@ async function init() {
         }
       },
       onLog: (msg) => {
-        // Don't overwrite "Menu" / "Playing" state display with log messages
         if (sm.state !== "menu" && sm.state !== "playing") {
           statusEl.textContent = msg;
         }
       },
     });
 
-    buildTitleButtons(structure, sm);
-    setupRemote(sm);
+    buildTitleButtons(titleSelectEl, structure, sm);
+    setupRemote(remoteEl, sm);
     setupKeyboard(sm);
-    setupOverlayMouse(sm);
+    setupOverlayMouse(overlay, menuOverlay, sm);
 
-    // Auto-play via First Play PGC
     await sm.start();
   } catch (err) {
     console.error("[init] Failed:", err);
@@ -212,4 +321,31 @@ async function init() {
   }
 }
 
-void init();
+/* --- Hash router --- */
+// #/              → library grid
+// #/disc/:slug    → player for that disc
+
+async function route() {
+  const hash = location.hash || "#/";
+  const discMatch = hash.match(/^#\/disc\/(.+)$/);
+
+  if (discMatch) {
+    const slug = decodeURIComponent(discMatch[1]);
+    await openDisc(slug);
+  } else {
+    // Library view
+    try {
+      appEl.innerHTML = '<div class="loading">Loading library...</div>';
+      const resp = await fetch("/api/library");
+      if (!resp.ok) throw new Error(`Failed to fetch library: ${resp.statusText}`);
+      const data = (await resp.json()) as { discs: LibraryDisc[] };
+      showLibrary(data.discs);
+    } catch (err) {
+      console.error("[init] Failed:", err);
+      appEl.innerHTML = `<div class="loading">Error: ${String(err)}</div>`;
+    }
+  }
+}
+
+window.addEventListener("hashchange", () => void route());
+void route();
