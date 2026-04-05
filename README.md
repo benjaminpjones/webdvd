@@ -111,9 +111,9 @@ cd player && npm run test:unit
 # Lint + format check
 cd player && npm run lint && npm run format:check
 
-# WASM smoke test — verifies IFO parsing + VM event loop (Node.js, no browser)
+# WASM build validation — verifies the Emscripten build in Node.js
 # Requires: test disc generated, WASM built
-node wasm/test.mjs
+node wasm/validate-build.mjs
 
 # E2E browser test — headless Chromium via Playwright
 # Starts both servers automatically, verifies menu navigation + playback

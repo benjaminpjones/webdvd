@@ -17,7 +17,7 @@ dev:
 
 # Run all tests (WASM smoke + e2e)
 test:
-	node wasm/test.mjs
+	node wasm/validate-build.mjs
 	cd player && npm test
 
 # Build WASM module (requires emcc on PATH)

@@ -1,12 +1,12 @@
 /**
- * Smoke test for the libdvdnav WASM module.
+ * WASM build validation — verifies the Emscripten build works in Node.js.
  *
- * Loads the Emscripten module in Node.js, writes test disc IFO files
- * into MEMFS, opens the disc, and asserts the structure is correct.
+ * Loads the WASM module, writes test disc files into MEMFS, opens the disc,
+ * queries structure, and drives the VM event loop to confirm navigation works.
  *
  * Usage:
  *   # Generate test disc first: ./scripts/make-test-disc.sh
- *   node wasm/test.mjs [/path/to/VIDEO_TS]
+ *   node wasm/validate-build.mjs [/path/to/VIDEO_TS]
  */
 
 import { createRequire } from "module";

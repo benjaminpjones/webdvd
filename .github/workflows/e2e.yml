@@ -55,9 +55,9 @@ jobs:
         if: env.SKIP != 'true'
         run: ./scripts/make-test-disc.sh
 
-      - name: WASM smoke test
+      - name: WASM build validation
         if: env.SKIP != 'true'
-        run: node wasm/test.mjs
+        run: node wasm/validate-build.mjs
 
       - name: Build server
         if: env.SKIP != 'true'

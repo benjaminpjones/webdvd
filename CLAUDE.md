@@ -18,7 +18,7 @@ cd server && cargo run -- /tmp/webdvd-test/VIDEO_TS
 cd player && npm run dev
 
 # Tests
-node wasm/test.mjs            # WASM smoke test (Node.js)
+node wasm/validate-build.mjs   # WASM build validation (Node.js)
 cd player && npm test          # Playwright e2e (headless browser)
 ```
 
