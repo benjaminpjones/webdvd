@@ -51,7 +51,7 @@ Point webdvd at a `VIDEO_TS` folder and relive 1999 in a browser tab.
 
 **Session Manager (TypeScript):** On page load, the session manager "inserts the disc" by running the First Play PGC through the WASM VM. It spins the `dvdnav_get_next_block()` event loop (discarding MPEG-2 data, processing only navigation events like CELL_CHANGE, VTS_CHANGE, HIGHLIGHT, STILL_FRAME, HOP_CHANNEL, STOP) to determine what to play. If the disc lands in a menu, the overlay shows button highlights and waits for user input. If it lands in a title, the server is told to transcode that titleset. Button activation re-enters the event loop, using `awaitingTransition` tracking to skip stale menu cells until the VM completes the jump. Chapter seeks use sector-based offsets for fast startup; title switches require a new transcode request (~1-2s for ffmpeg startup).
 
-**Menus (Canvas):** Button highlights are rendered on a `<canvas>` layer over the video. Click regions and arrow-key navigation are driven by PCI packets parsed by libdvdnav. Button activation triggers VM commands that navigate between menus and titles. An on-screen DVD remote provides arrow keys, OK, and Menu buttons for navigation. Full subpicture RLE decoding (for rendered menu text/graphics) is planned for a future milestone — currently menus use rectangle highlights only.
+**Menus (Canvas):** Subpicture overlays are rendered on a `<canvas>` layer over the video. SPU packets are demuxed from menu VOBs, RLE-decoded into 2-bit indexed bitmaps, and painted with CLUT palette colors from the IFO. Button highlights use PCI color overrides (btn_colit) for selected/activated states. Click regions and arrow-key navigation are driven by PCI packets parsed by libdvdnav. Button activation triggers VM commands that navigate between menus and titles. An on-screen DVD remote provides arrow keys, OK, and Menu buttons for navigation.
 
 ## Tech Stack
 
@@ -149,6 +149,9 @@ player/              TypeScript + Vite browser app
   src/main.ts        App entry point — auto-play via SessionManager
   src/dvdnav.ts      WASM module wrapper — DvdSession class, per-PGC VOB loading
   src/ifo-parser.ts  IFO binary parser — extracts menu PGC cell sector ranges
+  src/spu-demux.ts   MPEG-2 PS subpicture packet extractor
+  src/spu-decode.ts  SPU control sequence parser + RLE bitmap decoder
+  src/overlay.ts     Subpicture renderer (canvas overlay + DVD remote)
   src/session.ts     DVD Session Manager — VM event loop + video orchestration
   e2e/               Playwright tests
 wasm/
@@ -157,7 +160,6 @@ wasm/
   src/config.h       Emscripten build config
   build.sh           Compiles C sources → dvdnav.js + dvdnav.wasm
   test.mjs           Node.js smoke test (IFO parsing + VM event loop)
-  src/overlay.ts     Menu button highlight renderer (canvas overlay + DVD remote)
 scripts/             Dev utilities (test disc generation with menus via dvdauthor + spumux)
 ```
 
@@ -225,7 +227,7 @@ Some DVDs interleave multiple angles at the VOBU level within a single VOB — e
 - [x] Click/keyboard → button activation → VM command → navigation
 - [x] Full menu → movie → menu flow
 - [x] On-screen DVD remote (arrows, OK, Menu)
-- [ ] Subpicture stream parsing and RLE decoding (currently rectangle highlights only)
+- [x] Subpicture stream parsing and RLE decoding
 - [x] Per-PGC partial VOB loading (large menu VOBs load only the root PGC's cells; sub-menu cells fetched on demand at CELL_CHANGE)
 
 ### M4: Full Experience
