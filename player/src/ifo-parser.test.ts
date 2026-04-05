@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { readFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { resolve } from "path";
 import {
   parseMenuPgcs,
@@ -103,13 +103,15 @@ describe("parseMenuPgcs", () => {
     expect(parseMenuPgcs(buf)).toEqual([]);
   });
 
-  test("parses test disc VTS_01_0.IFO", () => {
+  test.skipIf(
+    !existsSync(resolve(__dirname, "../../test-data/VTS_01_0.IFO")) &&
+      !existsSync("/tmp/webdvd-test/VIDEO_TS/VTS_01_0.IFO"),
+  )("parses test disc VTS_01_0.IFO", () => {
     const ifoPath = resolve(__dirname, "../../test-data/VTS_01_0.IFO");
     let ifoData: ArrayBuffer;
     try {
       ifoData = readFileSync(ifoPath).buffer;
     } catch {
-      // Fall back to /tmp test disc location
       const fallback = "/tmp/webdvd-test/VIDEO_TS/VTS_01_0.IFO";
       ifoData = readFileSync(fallback).buffer;
     }
