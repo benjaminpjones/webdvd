@@ -32,7 +32,12 @@ function displayDiscStructure(structure: DiscStructure) {
     lines.push(`Serial: ${structure.serialString}`);
   }
 
-  const aspect = structure.videoAspect === 0 ? "4:3" : structure.videoAspect === 2 ? "16:9" : `${structure.videoAspect}`;
+  const aspect =
+    structure.videoAspect === 0
+      ? "4:3"
+      : structure.videoAspect === 2
+        ? "16:9"
+        : `${structure.videoAspect}`;
   lines.push(`Video: ${structure.videoWidth}x${structure.videoHeight} (${aspect})`);
 
   if (structure.audioStreams.length > 0) {
@@ -124,7 +129,9 @@ function setupOverlayMouse(sm: SessionManager) {
   overlay.addEventListener("click", (e) => {
     if (sm.state !== "menu") return;
     const pt = menuOverlay.screenToDvd(e.clientX, e.clientY);
-    console.log(`[mouse] click screen=(${e.clientX},${e.clientY}) dvd=${pt ? `(${pt.x},${pt.y})` : "null"}`);
+    console.log(
+      `[mouse] click screen=(${e.clientX},${e.clientY}) dvd=${pt ? `(${pt.x},${pt.y})` : "null"}`,
+    );
     if (pt) void sm.menuClick(pt.x, pt.y);
   });
 
@@ -136,7 +143,9 @@ function setupOverlayMouse(sm: SessionManager) {
       // Log every 30th hover to avoid spam
       if (hoverLog++ % 30 === 0) {
         const rect = overlay.getBoundingClientRect();
-        console.log(`[mouse] hover screen=(${e.clientX},${e.clientY}) dvd=(${pt.x},${pt.y}) overlay=${Math.round(rect.width)}x${Math.round(rect.height)} buttons: ${sm.menuState?.buttons.map(b => `#${b.buttonN}:(${b.x0},${b.y0})-(${b.x1},${b.y1})`).join(" ")}`);
+        console.log(
+          `[mouse] hover screen=(${e.clientX},${e.clientY}) dvd=(${pt.x},${pt.y}) overlay=${Math.round(rect.width)}x${Math.round(rect.height)} buttons: ${sm.menuState?.buttons.map((b) => `#${b.buttonN}:(${b.x0},${b.y0})-(${b.x1},${b.y1})`).join(" ")}`,
+        );
       }
       sm.menuHover(pt.x, pt.y);
     }
@@ -156,10 +165,16 @@ async function init() {
 
     const sm = new SessionManager(session, video, structure, {
       onStateChange: (state) => {
-        statusEl.textContent = state === "loading" ? "Loading..." :
-          state === "playing" ? `Playing title ${sm.title}, chapter ${sm.part}` :
-          state === "menu" ? "Menu" :
-          state === "stopped" ? "Stopped" : "";
+        statusEl.textContent =
+          state === "loading"
+            ? "Loading..."
+            : state === "playing"
+              ? `Playing title ${sm.title}, chapter ${sm.part}`
+              : state === "menu"
+                ? "Menu"
+                : state === "stopped"
+                  ? "Stopped"
+                  : "";
 
         // Toggle overlay interactivity in menu state
         const inMenu = state === "menu";

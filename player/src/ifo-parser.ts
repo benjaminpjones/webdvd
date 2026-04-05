@@ -92,9 +92,7 @@ export function isSectorRangeLoaded(
   lastSector: number,
   loadedRanges: CellRange[],
 ): boolean {
-  return loadedRanges.some(
-    (r) => firstSector >= r.firstSector && lastSector <= r.lastSector,
-  );
+  return loadedRanges.some((r) => firstSector >= r.firstSector && lastSector <= r.lastSector);
 }
 
 /** Merge overlapping/adjacent sector ranges into minimal set. */

@@ -47,7 +47,7 @@ export class SessionManager {
   private currentTitle = 0;
   private currentPart = 0;
   private menuFirstSector = 0; // VOB-absolute sector of the current menu cell
-  private menuLastSector = 0;  // VOB-absolute last sector of the current menu cell
+  private menuLastSector = 0; // VOB-absolute last sector of the current menu cell
   private _state: SessionState = "idle";
   private _menuState: MenuState | null = null;
   private onStateChange: ((state: SessionState) => void) | null = null;
@@ -168,7 +168,9 @@ export class SessionManager {
       if (titleInfo?.vts) {
         this.log(`VM fallback: playing VTS ${titleInfo.vts} for title ${title}`);
         this.playTarget({
-          vts: titleInfo.vts, title, part: 1,
+          vts: titleInfo.vts,
+          title,
+          part: 1,
           sector: titleInfo.firstSector,
           lastSector: titleInfo.lastSector,
         });
@@ -245,7 +247,9 @@ export class SessionManager {
     // the current menu's cell loop can fire before the jump takes effect.
     // Use postActivation flag to skip the first menu detection.
     const target = await this.driveVM(true, true);
-    this.log(`Post-activate: target=${target ? `VTS${target.vts}/T${target.title}` : "null"} state=${this._state}`);
+    this.log(
+      `Post-activate: target=${target ? `VTS${target.vts}/T${target.title}` : "null"} state=${this._state}`,
+    );
     if (target) {
       this.playTarget(target);
     } else if (this._state === "menu") {
@@ -325,7 +329,9 @@ export class SessionManager {
     }
     const qs = params.toString();
     if (qs) url += `?${qs}`;
-    this.log(`Loading menu video (VTS ${this.currentVts}, sector=${this.menuFirstSector}-${this.menuLastSector})...`);
+    this.log(
+      `Loading menu video (VTS ${this.currentVts}, sector=${this.menuFirstSector}-${this.menuLastSector})...`,
+    );
     this.video.src = url;
     this.video.muted = false;
     this.video.loop = false;
@@ -343,10 +349,14 @@ export class SessionManager {
    * Yields to the browser event loop periodically to avoid blocking UI.
    * @param acceptTitles If false, skip VTS title cells (for First Play navigation).
    */
-  private async driveVM(acceptTitles = true, postActivation = false, requestedTitle?: number): Promise<PlaybackTarget | null> {
+  private async driveVM(
+    acceptTitles = true,
+    postActivation = false,
+    requestedTitle?: number,
+  ): Promise<PlaybackTarget | null> {
     let clut: number[] = [];
-    let lastMenuSector = 0;       // Track last menu cell's VOB-absolute sector
-    let lastMenuLastSector = 0;   // Track last menu cell's VOB-absolute last sector
+    let lastMenuSector = 0; // Track last menu cell's VOB-absolute sector
+    let lastMenuLastSector = 0; // Track last menu cell's VOB-absolute last sector
     // After HOP or button activation, PCI may be stale — skip first menu detection.
     // Start high (999) normally so we don't skip anything.
     let menuCellsSinceHop = postActivation ? 0 : 999;
@@ -398,7 +408,9 @@ export class SessionManager {
             this.log(`Falling back to direct transcode of VTS ${vts} (title ${title})`);
             this.currentVts = vts;
             return {
-              vts, title, part: 1,
+              vts,
+              title,
+              part: 1,
               sector: titleInfo?.firstSector,
               lastSector: titleInfo?.lastSector,
             };
@@ -443,7 +455,9 @@ export class SessionManager {
                 lastMenuLastSector,
               );
               if (fetched) {
-                this.log(`Loaded menu cell sectors ${lastMenuSector}-${lastMenuLastSector} on demand`);
+                this.log(
+                  `Loaded menu cell sectors ${lastMenuSector}-${lastMenuLastSector} on demand`,
+                );
               }
             }
 
@@ -452,7 +466,9 @@ export class SessionManager {
             // NAV_PACKET, so skip it. By the second CELL_CHANGE, the C loop
             // has read blocks (including NAV_PACKETs) from the first cell.
             if (menuCellsSinceHop < 2 || awaitingTransition) {
-              this.log(`Menu cell skip (cellsSinceHop=${menuCellsSinceHop}, awaitingTransition=${awaitingTransition})`);
+              this.log(
+                `Menu cell skip (cellsSinceHop=${menuCellsSinceHop}, awaitingTransition=${awaitingTransition})`,
+              );
               continue;
             }
 
@@ -465,7 +481,9 @@ export class SessionManager {
               }
               this.menuFirstSector = lastMenuSector;
               this.menuLastSector = lastMenuLastSector;
-              this.log(`Menu detected via CELL_CHANGE: ${buttons.length} buttons, current=${currentButton}, sector=${this.menuFirstSector}-${this.menuLastSector}`);
+              this.log(
+                `Menu detected via CELL_CHANGE: ${buttons.length} buttons, current=${currentButton}, sector=${this.menuFirstSector}-${this.menuLastSector}`,
+              );
               this.setMenu({ buttons, currentButton, clut });
               this.setState("menu");
               return null;
@@ -517,13 +535,17 @@ export class SessionManager {
 
         case DVDNAV_HIGHLIGHT: {
           const hlButtons = this.session.getButtons();
-          this.log(`Highlight: button=${ev.buttonN} display=${ev.display} availableButtons=${hlButtons.length} cellsSinceHop=${menuCellsSinceHop}`);
+          this.log(
+            `Highlight: button=${ev.buttonN} display=${ev.display} availableButtons=${hlButtons.length} cellsSinceHop=${menuCellsSinceHop}`,
+          );
           if (ev.display && ev.display > 0 && hlButtons.length > 0) {
             // After HOP_CHANNEL, PCI is stale until NAV_PACKETs from the
             // new PGC have been read. HIGHLIGHT can fire before that happens,
             // so skip it when we haven't seen enough cells since the hop.
             if (menuCellsSinceHop < 2 || awaitingTransition) {
-              this.log(`Ignoring HIGHLIGHT (cellsSinceHop=${menuCellsSinceHop}, awaitingTransition=${awaitingTransition})`);
+              this.log(
+                `Ignoring HIGHLIGHT (cellsSinceHop=${menuCellsSinceHop}, awaitingTransition=${awaitingTransition})`,
+              );
               continue;
             }
             let currentButton = this.session.getCurrentButton();
@@ -532,7 +554,9 @@ export class SessionManager {
             }
             this.menuFirstSector = lastMenuSector;
             this.menuLastSector = lastMenuLastSector;
-            this.log(`Menu detected via HIGHLIGHT: ${hlButtons.length} buttons, current=${currentButton}, sector=${this.menuFirstSector}-${this.menuLastSector}`);
+            this.log(
+              `Menu detected via HIGHLIGHT: ${hlButtons.length} buttons, current=${currentButton}, sector=${this.menuFirstSector}-${this.menuLastSector}`,
+            );
             this.setMenu({ buttons: hlButtons, currentButton, clut });
             this.setState("menu");
             return null;
@@ -549,7 +573,9 @@ export class SessionManager {
             const vts = this.currentVts > 0 ? this.currentVts : 1;
             const titleInfo = this.structure.titles.find((t) => t.vts === vts);
             if (titleInfo) {
-              this.log(`STOP after activation — falling back to VTS ${vts} (title ${titleInfo.title})`);
+              this.log(
+                `STOP after activation — falling back to VTS ${vts} (title ${titleInfo.title})`,
+              );
               return { vts, title: titleInfo.title, part: 1 };
             }
           }
@@ -590,7 +616,9 @@ export class SessionManager {
     this.currentPart = target.part;
     const vts = target.vts;
 
-    this.log(`Playing VTS ${vts} (title ${target.title}, chapter ${target.part}, sector=${target.sector ?? 0}, lastSector=${target.lastSector ?? 0})`);
+    this.log(
+      `Playing VTS ${vts} (title ${target.title}, chapter ${target.part}, sector=${target.sector ?? 0}, lastSector=${target.lastSector ?? 0})`,
+    );
     this.setState("loading");
 
     let url = `/api/transcode/${vts}`;
@@ -611,11 +639,14 @@ export class SessionManager {
     const onCanPlay = () => {
       this.video.removeEventListener("canplay", onCanPlay);
 
-      this.video.play().then(() => {
-        this.setState("playing");
-      }).catch((err) => {
-        this.log(`Play failed: ${err}`);
-      });
+      this.video
+        .play()
+        .then(() => {
+          this.setState("playing");
+        })
+        .catch((err) => {
+          this.log(`Play failed: ${err}`);
+        });
     };
 
     this.video.addEventListener("canplay", onCanPlay);

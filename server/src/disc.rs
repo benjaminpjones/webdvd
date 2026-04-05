@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+#[cfg(has_dvdread)]
 use std::sync::Mutex;
 
 #[cfg(has_dvdread)]

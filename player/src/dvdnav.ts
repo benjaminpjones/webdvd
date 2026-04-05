@@ -29,7 +29,11 @@ interface EmscriptenFS {
 }
 
 interface DvdnavModule {
-  cwrap(name: string, returnType: string | null, argTypes: string[]): (...args: unknown[]) => unknown;
+  cwrap(
+    name: string,
+    returnType: string | null,
+    argTypes: string[],
+  ): (...args: unknown[]) => unknown;
   FS: EmscriptenFS;
 }
 
@@ -85,8 +89,8 @@ export interface NavEvent {
   pgN?: number;
   pgcLengthMs?: number;
   cellStartSectors?: number;
-  firstSector?: number;  // VOB-absolute first sector of the cell
-  lastSector?: number;   // VOB-absolute last sector of the cell
+  firstSector?: number; // VOB-absolute first sector of the cell
+  lastSector?: number; // VOB-absolute last sector of the cell
   pgcLastSector?: number; // VOB-absolute last sector of the PGC's final cell
   title?: number;
   part?: number;
@@ -128,10 +132,10 @@ export interface TitleInfo {
   angles: number;
   durationMs: number;
   chapterTimesMs: number[];
-  vts: number;       // VTS (titleset) number this title belongs to
-  vtsTtn: number;    // title number within the VTS
-  firstSector: number;  // VOB-absolute first sector of PGC's first cell
-  lastSector: number;   // VOB-absolute last sector of PGC's last cell
+  vts: number; // VTS (titleset) number this title belongs to
+  vtsTtn: number; // title number within the VTS
+  firstSector: number; // VOB-absolute first sector of PGC's first cell
+  lastSector: number; // VOB-absolute last sector of PGC's last cell
 }
 
 export interface AudioStream {
@@ -159,25 +163,22 @@ let modulePromise: Promise<DvdnavModule> | null = null;
 async function getModule(): Promise<DvdnavModule> {
   if (!modulePromise) {
     modulePromise = (async () => {
-      const factory = await new Promise<
-        (opts?: object) => Promise<DvdnavModule>
-      >((resolve, reject) => {
-        const script = document.createElement("script");
-        script.src = "/wasm/dvdnav.js";
-        script.onload = () => {
-          const fn = (globalThis as Record<string, unknown>)[
-            "createDvdnavModule"
-          ];
-          if (typeof fn === "function") {
-            resolve(fn as (opts?: object) => Promise<DvdnavModule>);
-          } else {
-            reject(new Error("createDvdnavModule not found on globalThis"));
-          }
-        };
-        script.onerror = () =>
-          reject(new Error("Failed to load /wasm/dvdnav.js"));
-        document.head.appendChild(script);
-      });
+      const factory = await new Promise<(opts?: object) => Promise<DvdnavModule>>(
+        (resolve, reject) => {
+          const script = document.createElement("script");
+          script.src = "/wasm/dvdnav.js";
+          script.onload = () => {
+            const fn = (globalThis as Record<string, unknown>)["createDvdnavModule"];
+            if (typeof fn === "function") {
+              resolve(fn as (opts?: object) => Promise<DvdnavModule>);
+            } else {
+              reject(new Error("createDvdnavModule not found on globalThis"));
+            }
+          };
+          script.onerror = () => reject(new Error("Failed to load /wasm/dvdnav.js"));
+          document.head.appendChild(script);
+        },
+      );
       return factory();
     })();
   }
@@ -185,8 +186,7 @@ async function getModule(): Promise<DvdnavModule> {
 }
 
 function bindFunctions(mod: DvdnavModule): DvdnavBindings {
-  const w = (name: string, ret: string | null, args: string[]) =>
-    mod.cwrap(name, ret, args);
+  const w = (name: string, ret: string | null, args: string[]) => mod.cwrap(name, ret, args);
   return {
     open: w("dvd_open", "number", ["string"]) as DvdnavBindings["open"],
     close: w("dvd_close", null, []) as DvdnavBindings["close"],
@@ -208,23 +208,57 @@ function bindFunctions(mod: DvdnavModule): DvdnavBindings {
     getVideoAspect: w("dvd_get_video_aspect", "number", []) as DvdnavBindings["getVideoAspect"],
     getVideoWidth: w("dvd_get_video_width", "number", []) as DvdnavBindings["getVideoWidth"],
     getVideoHeight: w("dvd_get_video_height", "number", []) as DvdnavBindings["getVideoHeight"],
-    getNumAudioStreams: w("dvd_get_num_audio_streams", "number", []) as DvdnavBindings["getNumAudioStreams"],
+    getNumAudioStreams: w(
+      "dvd_get_num_audio_streams",
+      "number",
+      [],
+    ) as DvdnavBindings["getNumAudioStreams"],
     getAudioLang: w("dvd_get_audio_lang", "number", ["number"]) as DvdnavBindings["getAudioLang"],
-    getAudioChannels: w("dvd_get_audio_channels", "number", ["number"]) as DvdnavBindings["getAudioChannels"],
-    getAudioFormat: w("dvd_get_audio_format", "number", ["number"]) as DvdnavBindings["getAudioFormat"],
-    getNumSpuStreams: w("dvd_get_num_spu_streams", "number", []) as DvdnavBindings["getNumSpuStreams"],
+    getAudioChannels: w("dvd_get_audio_channels", "number", [
+      "number",
+    ]) as DvdnavBindings["getAudioChannels"],
+    getAudioFormat: w("dvd_get_audio_format", "number", [
+      "number",
+    ]) as DvdnavBindings["getAudioFormat"],
+    getNumSpuStreams: w(
+      "dvd_get_num_spu_streams",
+      "number",
+      [],
+    ) as DvdnavBindings["getNumSpuStreams"],
     getSpuLang: w("dvd_get_spu_lang", "number", ["number"]) as DvdnavBindings["getSpuLang"],
     describeTitle: w("dvd_describe_title", "string", ["number"]) as DvdnavBindings["describeTitle"],
     /* Menu / Button (M3) */
-    getCurrentButton: w("dvd_get_current_button", "number", []) as DvdnavBindings["getCurrentButton"],
+    getCurrentButton: w(
+      "dvd_get_current_button",
+      "number",
+      [],
+    ) as DvdnavBindings["getCurrentButton"],
     getButtons: w("dvd_get_buttons", "string", []) as DvdnavBindings["getButtons"],
     buttonActivate: w("dvd_button_activate", "number", []) as DvdnavBindings["buttonActivate"],
     buttonSelectUp: w("dvd_button_select_up", "number", []) as DvdnavBindings["buttonSelectUp"],
-    buttonSelectDown: w("dvd_button_select_down", "number", []) as DvdnavBindings["buttonSelectDown"],
-    buttonSelectLeft: w("dvd_button_select_left", "number", []) as DvdnavBindings["buttonSelectLeft"],
-    buttonSelectRight: w("dvd_button_select_right", "number", []) as DvdnavBindings["buttonSelectRight"],
-    mouseSelect: w("dvd_mouse_select", "number", ["number", "number"]) as DvdnavBindings["mouseSelect"],
-    mouseActivate: w("dvd_mouse_activate", "number", ["number", "number"]) as DvdnavBindings["mouseActivate"],
+    buttonSelectDown: w(
+      "dvd_button_select_down",
+      "number",
+      [],
+    ) as DvdnavBindings["buttonSelectDown"],
+    buttonSelectLeft: w(
+      "dvd_button_select_left",
+      "number",
+      [],
+    ) as DvdnavBindings["buttonSelectLeft"],
+    buttonSelectRight: w(
+      "dvd_button_select_right",
+      "number",
+      [],
+    ) as DvdnavBindings["buttonSelectRight"],
+    mouseSelect: w("dvd_mouse_select", "number", [
+      "number",
+      "number",
+    ]) as DvdnavBindings["mouseSelect"],
+    mouseActivate: w("dvd_mouse_activate", "number", [
+      "number",
+      "number",
+    ]) as DvdnavBindings["mouseActivate"],
     menuCall: w("dvd_menu_call", "number", ["number"]) as DvdnavBindings["menuCall"],
     goUp: w("dvd_go_up", "number", []) as DvdnavBindings["goUp"],
     getLastVobuPtm: w("dvd_get_last_vobu_ptm", "number", []) as DvdnavBindings["getLastVobuPtm"],
@@ -260,10 +294,7 @@ async function loadDiscFiles(mod: DvdnavModule): Promise<LoadState> {
 
   // Fetch IFO/BUP and VOB file lists + preload ifo-parser module in parallel
   const ifoParserPromise = import("./ifo-parser");
-  const [ifoRes, vobRes] = await Promise.all([
-    fetch(`/api/ifo-list`),
-    fetch(`/api/vob-list`),
-  ]);
+  const [ifoRes, vobRes] = await Promise.all([fetch(`/api/ifo-list`), fetch(`/api/vob-list`)]);
   if (!ifoRes.ok) throw new Error(`Failed to fetch IFO list: ${ifoRes.statusText}`);
   if (!vobRes.ok) throw new Error(`Failed to fetch VOB list: ${vobRes.statusText}`);
 
@@ -315,87 +346,90 @@ async function loadDiscFiles(mod: DvdnavModule): Promise<LoadState> {
 
   // Load all VTS menu VOBs before returning — eliminates MEMFS timing race
   // with C code that opens VOB files during dvdnav_get_next_block.
-  await Promise.all(vtsMenuVobs.map(async (vobName) => {
-    const m = vobName.match(/^VTS_(\d+)_0\.VOB$/);
-    if (!m) return;
-    const vtsN = parseInt(m[1], 10);
-    const ifoName = `VTS_${m[1]}_0.IFO`;
+  await Promise.all(
+    vtsMenuVobs.map(async (vobName) => {
+      const m = vobName.match(/^VTS_(\d+)_0\.VOB$/);
+      if (!m) return;
+      const vtsN = parseInt(m[1], 10);
+      const ifoName = `VTS_${m[1]}_0.IFO`;
 
-    // Check VOB size via HEAD to decide full vs partial loading
-    const headResp = await fetch(`/api/vob/${vobName}`, { method: "HEAD" });
-    if (!headResp.ok) return;
-    const totalSize = parseInt(headResp.headers.get("content-length") ?? "0", 10);
+      // Check VOB size via HEAD to decide full vs partial loading
+      const headResp = await fetch(`/api/vob/${vobName}`, { method: "HEAD" });
+      if (!headResp.ok) return;
+      const totalSize = parseInt(headResp.headers.get("content-length") ?? "0", 10);
 
-    if (totalSize > 1024 * 1024) {
-      // Large VOB — try per-PGC partial loading
-      const ifoResp = await fetch(`/api/ifo/${ifoName}`);
-      let pgcs: import("./ifo-parser").PgcCells[] = [];
-      if (ifoResp.ok) {
-        pgcs = parseMenuPgcs(await ifoResp.arrayBuffer());
-        vtsMenuPgcs.set(vtsN, pgcs);
-      }
+      if (totalSize > 1024 * 1024) {
+        // Large VOB — try per-PGC partial loading
+        const ifoResp = await fetch(`/api/ifo/${ifoName}`);
+        let pgcs: import("./ifo-parser").PgcCells[] = [];
+        if (ifoResp.ok) {
+          pgcs = parseMenuPgcs(await ifoResp.arrayBuffer());
+          vtsMenuPgcs.set(vtsN, pgcs);
+        }
 
-      const rootPgc = pgcs.find((p) => p.entryId === ENTRY_ID_ROOT_MENU) ?? pgcs[0];
-      const cellRanges = rootPgc?.cells ?? [];
-      const rootBytes = cellRanges.reduce(
-        (sum, r) => sum + (r.lastSector - r.firstSector + 1) * 2048, 0,
-      );
-
-      const buf = new Uint8Array(totalSize);
-      vobBuffers.set(vtsN, buf);
-
-      if (rootBytes > 0 && rootBytes < totalSize * 0.75) {
-        // Fetch only root PGC cells
-        const fetches = cellRanges.map(async (range) => {
-          const resp = await fetch(
-            `/api/vob-range/${vobName}?start=${range.firstSector}&end=${range.lastSector}`,
-          );
-          if (!resp.ok) return 0;
-          const data = new Uint8Array(await resp.arrayBuffer());
-          buf.set(data, range.firstSector * 2048);
-          return data.byteLength;
-        });
-        const sizes = await Promise.all(fetches);
-        const bytesLoaded = sizes.reduce((a, b) => a + b, 0);
-
-        mod.FS.writeFile(`${vtsPath}/${vobName}`, buf);
-        loadedSectors.set(vtsN, [...cellRanges]);
-
-        const pct = ((bytesLoaded / totalSize) * 100).toFixed(1);
-        console.log(
-          `[dvdnav] Loaded ${vobName}: ${bytesLoaded} of ${totalSize} bytes (${pct}%, root PGC only)`,
+        const rootPgc = pgcs.find((p) => p.entryId === ENTRY_ID_ROOT_MENU) ?? pgcs[0];
+        const cellRanges = rootPgc?.cells ?? [];
+        const rootBytes = cellRanges.reduce(
+          (sum, r) => sum + (r.lastSector - r.firstSector + 1) * 2048,
+          0,
         );
+
+        const buf = new Uint8Array(totalSize);
+        vobBuffers.set(vtsN, buf);
+
+        if (rootBytes > 0 && rootBytes < totalSize * 0.75) {
+          // Fetch only root PGC cells
+          const fetches = cellRanges.map(async (range) => {
+            const resp = await fetch(
+              `/api/vob-range/${vobName}?start=${range.firstSector}&end=${range.lastSector}`,
+            );
+            if (!resp.ok) return 0;
+            const data = new Uint8Array(await resp.arrayBuffer());
+            buf.set(data, range.firstSector * 2048);
+            return data.byteLength;
+          });
+          const sizes = await Promise.all(fetches);
+          const bytesLoaded = sizes.reduce((a, b) => a + b, 0);
+
+          mod.FS.writeFile(`${vtsPath}/${vobName}`, buf);
+          loadedSectors.set(vtsN, [...cellRanges]);
+
+          const pct = ((bytesLoaded / totalSize) * 100).toFixed(1);
+          console.log(
+            `[dvdnav] Loaded ${vobName}: ${bytesLoaded} of ${totalSize} bytes (${pct}%, root PGC only)`,
+          );
+        } else {
+          // Root covers most of VOB — download full
+          const resp = await fetch(`/api/vob/${vobName}`);
+          if (!resp.ok) return;
+          const data = new Uint8Array(await resp.arrayBuffer());
+          buf.set(data);
+          mod.FS.writeFile(`${vtsPath}/${vobName}`, buf);
+          const totalSectors = Math.ceil(data.byteLength / 2048);
+          loadedSectors.set(vtsN, [{ firstSector: 0, lastSector: totalSectors - 1 }]);
+          console.log(`[dvdnav] Loaded ${vobName} (${data.byteLength} bytes)`);
+        }
       } else {
-        // Root covers most of VOB — download full
+        // Small VOB — download fully
         const resp = await fetch(`/api/vob/${vobName}`);
         if (!resp.ok) return;
         const data = new Uint8Array(await resp.arrayBuffer());
-        buf.set(data);
-        mod.FS.writeFile(`${vtsPath}/${vobName}`, buf);
-        const totalSectors = Math.ceil(data.byteLength / 2048);
-        loadedSectors.set(vtsN, [{ firstSector: 0, lastSector: totalSectors - 1 }]);
-        console.log(`[dvdnav] Loaded ${vobName} (${data.byteLength} bytes)`);
+        if (data.byteLength > 0) {
+          mod.FS.writeFile(`${vtsPath}/${vobName}`, data);
+          vobBuffers.set(vtsN, data);
+          const totalSectors = Math.ceil(data.byteLength / 2048);
+          loadedSectors.set(vtsN, [{ firstSector: 0, lastSector: totalSectors - 1 }]);
+          console.log(`[dvdnav] Loaded ${vobName} (${data.byteLength} bytes)`);
+        }
+        // Parse IFO for on-demand metadata
+        const ifoResp = await fetch(`/api/ifo/${ifoName}`);
+        if (ifoResp.ok) {
+          const pgcs = parseMenuPgcs(await ifoResp.arrayBuffer());
+          vtsMenuPgcs.set(vtsN, pgcs);
+        }
       }
-    } else {
-      // Small VOB — download fully
-      const resp = await fetch(`/api/vob/${vobName}`);
-      if (!resp.ok) return;
-      const data = new Uint8Array(await resp.arrayBuffer());
-      if (data.byteLength > 0) {
-        mod.FS.writeFile(`${vtsPath}/${vobName}`, data);
-        vobBuffers.set(vtsN, data);
-        const totalSectors = Math.ceil(data.byteLength / 2048);
-        loadedSectors.set(vtsN, [{ firstSector: 0, lastSector: totalSectors - 1 }]);
-        console.log(`[dvdnav] Loaded ${vobName} (${data.byteLength} bytes)`);
-      }
-      // Parse IFO for on-demand metadata
-      const ifoResp = await fetch(`/api/ifo/${ifoName}`);
-      if (ifoResp.ok) {
-        const pgcs = parseMenuPgcs(await ifoResp.arrayBuffer());
-        vtsMenuPgcs.set(vtsN, pgcs);
-      }
-    }
-  }));
+    }),
+  );
 
   console.log(`[dvdnav] Phase 2: loaded ${vtsMenuVobs.length} VTS menu VOBs`);
 
@@ -497,13 +531,9 @@ export class DvdSession {
     }
 
     const vobName = `VTS_${String(vtsN).padStart(2, "0")}_0.VOB`;
-    console.log(
-      `[dvdnav] On-demand loading sectors ${firstSector}-${lastSector} from ${vobName}`,
-    );
+    console.log(`[dvdnav] On-demand loading sectors ${firstSector}-${lastSector} from ${vobName}`);
 
-    const resp = await fetch(
-      `/api/vob-range/${vobName}?start=${firstSector}&end=${lastSector}`,
-    );
+    const resp = await fetch(`/api/vob-range/${vobName}?start=${firstSector}&end=${lastSector}`);
     if (!resp.ok) {
       console.warn(`[dvdnav] Failed to fetch sectors: ${resp.statusText}`);
       return false;
@@ -514,10 +544,7 @@ export class DvdSession {
     if (buf) {
       const byteOffset = firstSector * 2048;
       buf.set(data, byteOffset);
-      this.loadState.mod.FS.writeFile(
-        `${this.loadState.vtsPath}/${vobName}`,
-        buf,
-      );
+      this.loadState.mod.FS.writeFile(`${this.loadState.vtsPath}/${vobName}`, buf);
     }
 
     // Track the newly loaded range

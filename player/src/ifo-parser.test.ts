@@ -104,10 +104,7 @@ describe("parseMenuPgcs", () => {
   });
 
   test("parses test disc VTS_01_0.IFO", () => {
-    const ifoPath = resolve(
-      __dirname,
-      "../../test-data/VTS_01_0.IFO",
-    );
+    const ifoPath = resolve(__dirname, "../../test-data/VTS_01_0.IFO");
     let ifoData: ArrayBuffer;
     try {
       ifoData = readFileSync(ifoPath).buffer;
@@ -135,9 +132,7 @@ describe("parseMenuPgcs", () => {
 
     // Cell ranges should be merged (no overlaps)
     for (let i = 1; i < rootPgc!.cells.length; i++) {
-      expect(rootPgc!.cells[i].firstSector).toBeGreaterThan(
-        rootPgc!.cells[i - 1].lastSector + 1,
-      );
+      expect(rootPgc!.cells[i].firstSector).toBeGreaterThan(rootPgc!.cells[i - 1].lastSector + 1);
     }
   });
 

@@ -158,6 +158,7 @@ pub async fn transcode_to_stream(
 /// Parse a NAV pack sector to extract DSI fields needed for ILVU navigation.
 /// Returns (vobu_ea, vob_id, ilvu_flag, ilvu_ea) or None if the sector
 /// doesn't look like a valid NAV pack.
+#[cfg(any(has_dvdread, test))]
 fn parse_nav_pack(sector_data: &[u8]) -> Option<(u32, u16, bool, u32)> {
     if sector_data.len() < 2048 {
         return None;
@@ -191,6 +192,7 @@ fn parse_nav_pack(sector_data: &[u8]) -> Option<(u32, u16, bool, u32)> {
 /// Reads in chunks via a channel to avoid loading multi-GB title VOBs
 /// into memory at once. Handles interleaved (ILVU) cells by reading
 /// VOBU-by-VOBU and skipping alternate-angle data.
+#[allow(unused_variables)] // sector/last_sector only used with dvdread
 async fn pipe_dvdread(
     disc: &Arc<Disc>,
     titleset: u32,
