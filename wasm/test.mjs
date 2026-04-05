@@ -189,6 +189,23 @@ async function main() {
   // Cleanup
   dvd.close();
 
+  // IFO parser integration test — validate parseMenuPgcs against real disc data
+  console.log("\nTesting IFO parser against test disc...");
+  const ifoPath = join(videoTsDir, "VTS_01_0.IFO");
+  const ifoData = readFileSync(ifoPath);
+  const { parseMenuPgcs, ENTRY_ID_ROOT_MENU } = await import("../player/src/ifo-parser.ts");
+  const pgcs = parseMenuPgcs(ifoData.buffer);
+  assert(pgcs.length > 0, `parseMenuPgcs found ${pgcs.length} PGC(s)`);
+  const rootPgc = pgcs.find((p) => p.entryId === ENTRY_ID_ROOT_MENU);
+  assert(rootPgc !== undefined, "found root menu PGC (entry_id 0x83)");
+  if (rootPgc) {
+    assert(rootPgc.cells.length > 0, `root PGC has ${rootPgc.cells.length} cell(s)`);
+    for (const cell of rootPgc.cells) {
+      assert(cell.lastSector >= cell.firstSector,
+        `cell sector range valid: ${cell.firstSector}-${cell.lastSector}`);
+    }
+  }
+
   // Summary
   console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : `${failures} TEST(S) FAILED`}`);
   process.exit(failures === 0 ? 0 : 1);

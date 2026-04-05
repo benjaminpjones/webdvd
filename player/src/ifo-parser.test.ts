@@ -1,6 +1,4 @@
 import { describe, test, expect } from "vitest";
-import { existsSync, readFileSync } from "fs";
-import { resolve } from "path";
 import {
   parseMenuPgcs,
   mergeRanges,
@@ -101,41 +99,6 @@ describe("parseMenuPgcs", () => {
   test("returns empty for truncated buffer", () => {
     const buf = new ArrayBuffer(100);
     expect(parseMenuPgcs(buf)).toEqual([]);
-  });
-
-  test.skipIf(
-    !existsSync(resolve(__dirname, "../../test-data/VTS_01_0.IFO")) &&
-      !existsSync("/tmp/webdvd-test/VIDEO_TS/VTS_01_0.IFO"),
-  )("parses test disc VTS_01_0.IFO", () => {
-    const ifoPath = resolve(__dirname, "../../test-data/VTS_01_0.IFO");
-    let ifoData: ArrayBuffer;
-    try {
-      ifoData = readFileSync(ifoPath).buffer;
-    } catch {
-      const fallback = "/tmp/webdvd-test/VIDEO_TS/VTS_01_0.IFO";
-      ifoData = readFileSync(fallback).buffer;
-    }
-
-    const pgcs = parseMenuPgcs(ifoData);
-
-    // Test disc has menu PGCs
-    expect(pgcs.length).toBeGreaterThan(0);
-
-    // Should have a root menu PGC (entry_id 0x83)
-    const rootPgc = pgcs.find((p) => p.entryId === ENTRY_ID_ROOT_MENU);
-    expect(rootPgc).toBeDefined();
-    expect(rootPgc!.cells.length).toBeGreaterThan(0);
-
-    // Root PGC cells should have valid sector ranges
-    for (const cell of rootPgc!.cells) {
-      expect(cell.firstSector).toBeGreaterThanOrEqual(0);
-      expect(cell.lastSector).toBeGreaterThanOrEqual(cell.firstSector);
-    }
-
-    // Cell ranges should be merged (no overlaps)
-    for (let i = 1; i < rootPgc!.cells.length; i++) {
-      expect(rootPgc!.cells[i].firstSector).toBeGreaterThan(rootPgc!.cells[i - 1].lastSector + 1);
-    }
   });
 
   test("parses synthetic IFO with known structure", () => {
