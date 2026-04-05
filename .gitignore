@@ -2,5 +2,6 @@ server/target/
 player/node_modules/
 player/dist/
 player/public/wasm/
-player/test-results/
 wasm/build/
+test-results/
+.vite/
