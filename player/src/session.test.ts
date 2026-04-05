@@ -64,8 +64,32 @@ const evt = {
 /* --- Mock factories --- */
 
 const BUTTONS: ButtonInfo[] = [
-  { buttonN: 1, x0: 0, y0: 0, x1: 100, y1: 50, up: 1, down: 2, left: 1, right: 2, auto: 0 },
-  { buttonN: 2, x0: 0, y0: 60, x1: 100, y1: 110, up: 1, down: 2, left: 1, right: 2, auto: 0 },
+  {
+    buttonN: 1,
+    x0: 0,
+    y0: 0,
+    x1: 100,
+    y1: 50,
+    up: 1,
+    down: 2,
+    left: 1,
+    right: 2,
+    auto: 0,
+    btnColn: 1,
+  },
+  {
+    buttonN: 2,
+    x0: 0,
+    y0: 60,
+    x1: 100,
+    y1: 110,
+    up: 1,
+    down: 2,
+    left: 1,
+    right: 2,
+    auto: 0,
+    btnColn: 1,
+  },
 ];
 
 const DISC: DiscStructure = {
@@ -118,6 +142,12 @@ function createMockSession(events: NavEvent[]) {
     mouseSelect: vi.fn(() => false),
     stillSkip: vi.fn(),
     waitSkip: vi.fn(),
+    getButtonColors: vi.fn((): [[number, number], [number, number], [number, number]] => [
+      [0, 0],
+      [0, 0],
+      [0, 0],
+    ]),
+    getMenuVobData: vi.fn(() => null),
   };
 }
 

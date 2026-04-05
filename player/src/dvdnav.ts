@@ -78,6 +78,7 @@ interface DvdnavBindings {
   menuCall: (menuId: number) => number;
   goUp: () => number;
   getLastVobuPtm: () => number;
+  getButtonColors: () => string;
 }
 
 /* --- Public types --- */
@@ -124,7 +125,15 @@ export interface ButtonInfo {
   left: number;
   right: number;
   auto: number;
+  /** Button color group (0–3), indexes into PCI btn_colit */
+  btnColn: number;
 }
+
+/**
+ * Button color table from PCI. 3 color groups × 2 states (select, action).
+ * Each uint32 encodes [Ci3:4, Ci2:4, Ci1:4, Ci0:4, A3:4, A2:4, A1:4, A0:4].
+ */
+export type ButtonColorTable = [[number, number], [number, number], [number, number]];
 
 export interface TitleInfo {
   title: number;
@@ -262,6 +271,7 @@ function bindFunctions(mod: DvdnavModule): DvdnavBindings {
     menuCall: w("dvd_menu_call", "number", ["number"]) as DvdnavBindings["menuCall"],
     goUp: w("dvd_go_up", "number", []) as DvdnavBindings["goUp"],
     getLastVobuPtm: w("dvd_get_last_vobu_ptm", "number", []) as DvdnavBindings["getLastVobuPtm"],
+    getButtonColors: w("dvd_get_button_colors", "string", []) as DvdnavBindings["getButtonColors"],
   };
 }
 
@@ -310,9 +320,20 @@ async function loadDiscFiles(mod: DvdnavModule): Promise<LoadState> {
 
   // --- Phase 1 (blocking): IFOs/BUPs + VMGM VOB ---
   const vmgmVobs = allVobs.filter((name) => name.startsWith("VIDEO_TS"));
+
+  // Fetch VMGM VOBs, retain raw bytes for SPU demuxing
+  const vmgmVobBufs: Uint8Array[] = [];
+  const fetchVmgmVob = async (name: string) => {
+    const resp = await fetch(`/api/vob/${name}`);
+    if (!resp.ok) throw new Error(`Failed to fetch ${name}: ${resp.statusText}`);
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    mod.FS.writeFile(`${vtsPath}/${name}`, buf);
+    vmgmVobBufs.push(buf);
+  };
+
   await Promise.all([
     ...ifoFiles.map((name) => fetchFile(name, "ifo")),
-    ...vmgmVobs.map((name) => fetchFile(name, "vob")),
+    ...vmgmVobs.map((name) => fetchVmgmVob(name)),
   ]);
 
   // Create 0-byte placeholders for ALL VTS VOBs (menu + title).
@@ -338,6 +359,20 @@ async function loadDiscFiles(mod: DvdnavModule): Promise<LoadState> {
   const vtsMenuPgcs = new Map<number, import("./ifo-parser").PgcCells[]>();
   const loadedSectors = new Map<number, import("./ifo-parser").CellRange[]>();
   const vobBuffers = new Map<number, Uint8Array>();
+
+  // Store VMGM VOB data for SPU demuxing (VTS 0 = VMGM)
+  if (vmgmVobBufs.length === 1) {
+    vobBuffers.set(0, vmgmVobBufs[0]);
+  } else if (vmgmVobBufs.length > 1) {
+    const totalLen = vmgmVobBufs.reduce((sum, b) => sum + b.length, 0);
+    const combined = new Uint8Array(totalLen);
+    let off = 0;
+    for (const b of vmgmVobBufs) {
+      combined.set(b, off);
+      off += b.length;
+    }
+    vobBuffers.set(0, combined);
+  }
 
   // ifo-parser was preloaded in parallel with Phase 1
   const { parseMenuPgcs, ENTRY_ID_ROOT_MENU } = await ifoParserPromise;
@@ -665,6 +700,11 @@ export class DvdSession {
     return this.dvd.getLastVobuPtm();
   }
 
+  /** Get button color table from current PCI (3 groups × 2 states) */
+  getButtonColors(): ButtonColorTable {
+    return JSON.parse(this.dvd.getButtonColors()) as ButtonColorTable;
+  }
+
   getDiscStructure(): DiscStructure {
     if (!this._structure) {
       this._structure = queryStructure(this.dvd);
@@ -675,6 +715,21 @@ export class DvdSession {
       this.dvd.open(this.discPath);
     }
     return this._structure;
+  }
+
+  /**
+   * Get raw VOB data for a menu cell's sector range (for SPU demuxing).
+   * Returns the slice of the VOB buffer, or null if unavailable.
+   */
+  getMenuVobData(vtsN: number, firstSector: number, lastSector: number): Uint8Array | null {
+    if (!this.loadState) return null;
+    // VTS 0 = VMGM (VIDEO_TS.VOB), VTS > 0 = VTS menu VOBs
+    const buf = this.loadState.vobBuffers.get(vtsN);
+    if (!buf) return null;
+    const startByte = firstSector * 2048;
+    const endByte = (lastSector + 1) * 2048;
+    if (startByte >= buf.length) return null;
+    return buf.subarray(startByte, Math.min(endByte, buf.length));
   }
 
   /** Reset the VM to First Play PGC state (close + reopen) */

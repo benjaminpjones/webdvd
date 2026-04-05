@@ -20,7 +20,10 @@ import {
   DVDNAV_SPU_CLUT_CHANGE,
   type DiscStructure,
   type ButtonInfo,
+  type ButtonColorTable,
 } from "./dvdnav";
+import { demuxSubpictures } from "./spu-demux";
+import { decodeSpuPacket, type SpuImage } from "./spu-decode";
 
 export interface PlaybackTarget {
   vts: number;
@@ -37,6 +40,8 @@ export interface MenuState {
   buttons: ButtonInfo[];
   currentButton: number;
   clut: number[];
+  spuImage?: SpuImage;
+  buttonColors?: ButtonColorTable;
 }
 
 export class SessionManager {
@@ -101,6 +106,52 @@ export class SessionManager {
   private setMenu(menu: MenuState | null) {
     this._menuState = menu;
     this.onMenuChange?.(menu);
+  }
+
+  /** Cache: avoid re-parsing SPU for the same sector range */
+  private cachedSpuKey = "";
+  private cachedSpuImage: SpuImage | null = null;
+
+  /**
+   * Parse SPU from the current menu cell's VOB data and build a full MenuState.
+   */
+  private buildMenuState(buttons: ButtonInfo[], currentButton: number, clut: number[]): MenuState {
+    const spuImage = this.getMenuSpuImage();
+    let buttonColors: ButtonColorTable | undefined;
+    try {
+      buttonColors = this.session.getButtonColors();
+    } catch {
+      // PCI not available
+    }
+    return { buttons, currentButton, clut, spuImage, buttonColors };
+  }
+
+  private getMenuSpuImage(): SpuImage | undefined {
+    const key = `${this.currentVts}:${this.menuFirstSector}-${this.menuLastSector}`;
+    if (key === this.cachedSpuKey && this.cachedSpuImage) {
+      return this.cachedSpuImage;
+    }
+
+    const vobData = this.session.getMenuVobData(
+      this.currentVts,
+      this.menuFirstSector,
+      this.menuLastSector,
+    );
+    if (!vobData || vobData.length === 0) return undefined;
+
+    const packets = demuxSubpictures(vobData);
+    if (packets.length === 0) return undefined;
+
+    // Use the last SPU packet (most recent display)
+    const decoded = decodeSpuPacket(packets[packets.length - 1].data);
+    this.log(
+      `SPU: demuxed ${packets.length} packet(s), decoded=${decoded ? `${decoded.width}x${decoded.height}` : "null"}`,
+    );
+    if (!decoded) return undefined;
+
+    this.cachedSpuKey = key;
+    this.cachedSpuImage = decoded;
+    return decoded;
   }
 
   private log(msg: string) {
@@ -484,7 +535,7 @@ export class SessionManager {
               this.log(
                 `Menu detected via CELL_CHANGE: ${buttons.length} buttons, current=${currentButton}, sector=${this.menuFirstSector}-${this.menuLastSector}`,
               );
-              this.setMenu({ buttons, currentButton, clut });
+              this.setMenu(this.buildMenuState(buttons, currentButton, clut));
               this.setState("menu");
               return null;
             }
@@ -515,7 +566,7 @@ export class SessionManager {
             this.log(
               `Menu via STILL_FRAME (${ev.stillLength === 0xff ? "infinite" : ev.stillLength + "s"}): ${stillButtons.length} buttons, current=${currentButton}, sector=${this.menuFirstSector}-${this.menuLastSector}`,
             );
-            this.setMenu({ buttons: stillButtons, currentButton, clut });
+            this.setMenu(this.buildMenuState(stillButtons, currentButton, clut));
             this.setState("menu");
             return null;
           }
@@ -557,7 +608,7 @@ export class SessionManager {
             this.log(
               `Menu detected via HIGHLIGHT: ${hlButtons.length} buttons, current=${currentButton}, sector=${this.menuFirstSector}-${this.menuLastSector}`,
             );
-            this.setMenu({ buttons: hlButtons, currentButton, clut });
+            this.setMenu(this.buildMenuState(hlButtons, currentButton, clut));
             this.setState("menu");
             return null;
           }

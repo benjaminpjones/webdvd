@@ -5,10 +5,9 @@ import { test, expect } from "@playwright/test";
  * The session manager sets state → "menu" which triggers onStateChange.
  */
 async function waitForMenu(page: import("@playwright/test").Page) {
-  await page.waitForFunction(
-    () => document.getElementById("status")?.textContent === "Menu",
-    { timeout: 30_000 },
-  );
+  await page.waitForFunction(() => document.getElementById("status")?.textContent === "Menu", {
+    timeout: 30_000,
+  });
 }
 
 test.describe("DVD disc structure via WASM", () => {
@@ -123,9 +122,8 @@ test.describe("DVD menu navigation", () => {
     await waitForMenu(page);
 
     // The sub-menu should also have 3 buttons
-    const menuLogs = logs.filter((l) =>
-      l.includes("[session] Menu detected") ||
-      l.includes("[session] Menu via"),
+    const menuLogs = logs.filter(
+      (l) => l.includes("[session] Menu detected") || l.includes("[session] Menu via"),
     );
     // Should have at least 2 menu detections (root + sub-menu)
     expect(menuLogs.length).toBeGreaterThanOrEqual(2);
@@ -255,5 +253,29 @@ test.describe("DVD menu navigation", () => {
     expect(state.error).toBeNull();
     expect(state.paused).toBe(false);
     expect(state.readyState).toBeGreaterThanOrEqual(2);
+  });
+
+  test("menu renders subpicture overlay on canvas", async ({ page }) => {
+    await page.goto("/");
+    await waitForMenu(page);
+
+    // The test disc has SPU subpictures with gray button outlines (normal state).
+    // Verify the canvas overlay has non-transparent pixels in the button area.
+    // Button 1 spans x=240..479, y=130..169 in DVD coordinates (720x480 canvas).
+    const nonTransparent = await page.evaluate(() => {
+      const canvas = document.querySelector("canvas");
+      if (!canvas) return 0;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return 0;
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const { data } = imageData;
+      let count = 0;
+      for (let i = 3; i < data.length; i += 4) {
+        if (data[i] > 0) count++;
+      }
+      return count;
+    });
+
+    expect(nonTransparent).toBeGreaterThan(100);
   });
 });

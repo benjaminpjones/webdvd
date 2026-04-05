@@ -461,13 +461,40 @@ const char* dvd_get_buttons(void) {
         if (i > 0) json_buf[pos++] = ',';
         pos += snprintf(json_buf + pos, sizeof(json_buf) - pos,
             "{\"buttonN\":%d,\"x0\":%u,\"y0\":%u,\"x1\":%u,\"y1\":%u,"
-            "\"up\":%u,\"down\":%u,\"left\":%u,\"right\":%u,\"auto\":%u}",
+            "\"up\":%u,\"down\":%u,\"left\":%u,\"right\":%u,\"auto\":%u,"
+            "\"btnColn\":%u}",
             i + 1,
             (unsigned)btn->x_start, (unsigned)btn->y_start,
             (unsigned)btn->x_end, (unsigned)btn->y_end,
             (unsigned)btn->up, (unsigned)btn->down,
             (unsigned)btn->left, (unsigned)btn->right,
-            (unsigned)btn->auto_action_mode);
+            (unsigned)btn->auto_action_mode,
+            (unsigned)btn->btn_coln);
+    }
+    pos += snprintf(json_buf + pos, sizeof(json_buf) - pos, "]");
+    return json_buf;
+}
+
+/*
+ * dvd_get_button_colors() — return the PCI button color table (btn_colit).
+ * 3 color groups × 2 states (select, action) = 6 uint32 values.
+ * Each uint32 encodes [Ci3:4, Ci2:4, Ci1:4, Ci0:4, A3:4, A2:4, A1:4, A0:4]
+ * where Ci = CLUT index, A = alpha (0=transparent, 15=opaque).
+ */
+EMSCRIPTEN_KEEPALIVE
+const char* dvd_get_button_colors(void) {
+    if (!nav) return "[]";
+    pci_t *pci = dvdnav_get_current_nav_pci(nav);
+    if (!pci) return "[]";
+
+    int pos = 0;
+    pos += snprintf(json_buf + pos, sizeof(json_buf) - pos, "[");
+    for (int g = 0; g < 3; g++) {
+        if (g > 0) json_buf[pos++] = ',';
+        pos += snprintf(json_buf + pos, sizeof(json_buf) - pos,
+            "[%u,%u]",
+            (unsigned)pci->hli.btn_colit.btn_coli[g][0],
+            (unsigned)pci->hli.btn_colit.btn_coli[g][1]);
     }
     pos += snprintf(json_buf + pos, sizeof(json_buf) - pos, "]");
     return json_buf;

@@ -143,10 +143,12 @@ drawtext=${DT_BTN}:text='Main Menu':x=(w-tw)/2:y=320" \
     -c:a ac3 -b:a 192k \
     "$WORK_DIR/chapters_menu.mpg"
 
-echo "=== Generating button highlight images ==="
+echo "=== Generating subpicture images ==="
 
-# Button highlight images for spumux — white rectangles on transparent background.
-# These define the clickable/highlightable button regions.
+# SPU images for spumux. Three layers per menu:
+#   image=     Normal state (always visible) — gray button outlines
+#   highlight= Selected state — white filled rectangles
+#   select=    Activated state — same as highlight
 # Generated with ffmpeg (no imagemagick dependency).
 
 # Root menu: 5 buttons stacked vertically
@@ -155,25 +157,49 @@ echo "=== Generating button highlight images ==="
 # Button 3: "Title 3"          y=240..280
 # Button 4: "Title 4"          y=295..335
 # Button 5: "Title 1 Chapters" y=350..390
+
+# Normal state: gray filled rectangles at button positions (RGBA via geq filter)
+# geq is needed because drawbox doesn't preserve alpha on transparent canvas.
+# Button regions: 240-479 x {130-169, 185-224, 240-279, 295-334, 350-389}
+# Note: commas in between() must be escaped as \, inside ffmpeg filter expressions.
 $FFMPEG -y -loglevel error \
-    -f lavfi -i "color=c=black@0:s=720x480:d=0.04,format=rgba,drawbox=x=240:y=130:w=240:h=40:color=white:t=fill,drawbox=x=240:y=185:w=240:h=40:color=white:t=fill,drawbox=x=240:y=240:w=240:h=40:color=white:t=fill,drawbox=x=240:y=295:w=240:h=40:color=white:t=fill,drawbox=x=240:y=350:w=240:h=40:color=white:t=fill" \
+    -f lavfi -i "color=c=white:s=720x480:d=0.04,format=rgba" \
+    -vf "geq=r=128:g=128:b=128:a='if(between(X\,240\,479)*(between(Y\,130\,169)+between(Y\,185\,224)+between(Y\,240\,279)+between(Y\,295\,334)+between(Y\,350\,389))\,128\,0)'" \
+    -frames:v 1 "$WORK_DIR/root_image.png"
+
+# Highlight state: white filled rectangles (same regions, full alpha)
+$FFMPEG -y -loglevel error \
+    -f lavfi -i "color=c=white:s=720x480:d=0.04,format=rgba" \
+    -vf "geq=r=255:g=255:b=255:a='if(between(X\,240\,479)*(between(Y\,130\,169)+between(Y\,185\,224)+between(Y\,240\,279)+between(Y\,295\,334)+between(Y\,350\,389))\,255\,0)'" \
     -frames:v 1 "$WORK_DIR/root_highlight.png"
 
-# Chapters sub-menu: 3 buttons at correct positions (matching XML button coords)
+# Chapters sub-menu: 3 buttons
 # Button 1: "Chapter 1"  y=190..235
 # Button 2: "Chapter 2"  y=250..295
 # Button 3: "Main Menu"  y=310..355
+
+# Normal state: gray filled rectangles
+# Button regions: 260-459 x {190-234, 250-294, 310-354}
 $FFMPEG -y -loglevel error \
-    -f lavfi -i "color=c=black@0:s=720x480:d=0.04,format=rgba,drawbox=x=260:y=190:w=200:h=45:color=white:t=fill,drawbox=x=260:y=250:w=200:h=45:color=white:t=fill,drawbox=x=260:y=310:w=200:h=45:color=white:t=fill" \
+    -f lavfi -i "color=c=white:s=720x480:d=0.04,format=rgba" \
+    -vf "geq=r=128:g=128:b=128:a='if(between(X\,260\,459)*(between(Y\,190\,234)+between(Y\,250\,294)+between(Y\,310\,354))\,128\,0)'" \
+    -frames:v 1 "$WORK_DIR/chapters_image.png"
+
+# Highlight state: white filled rectangles
+$FFMPEG -y -loglevel error \
+    -f lavfi -i "color=c=white:s=720x480:d=0.04,format=rgba" \
+    -vf "geq=r=255:g=255:b=255:a='if(between(X\,260\,459)*(between(Y\,190\,234)+between(Y\,250\,294)+between(Y\,310\,354))\,255\,0)'" \
     -frames:v 1 "$WORK_DIR/chapters_highlight.png"
 
 echo "=== Muxing subtitles into menu videos ==="
 
-# Root menu spumux config — explicit button regions with navigation links
+# Root menu spumux config — explicit button regions with navigation links.
+# image= provides the always-visible normal state; highlight= shows on selection.
 cat > "$WORK_DIR/root_spu.xml" <<XMLEOF
 <subpictures>
  <stream>
   <spu start="00:00:00.00" end="00:00:03.00"
+       image="$WORK_DIR/root_image.png"
        highlight="$WORK_DIR/root_highlight.png"
        select="$WORK_DIR/root_highlight.png"
        force="yes" >
@@ -192,6 +218,7 @@ cat > "$WORK_DIR/chapters_spu.xml" <<XMLEOF
 <subpictures>
  <stream>
   <spu start="00:00:00.00" end="00:00:03.00"
+       image="$WORK_DIR/chapters_image.png"
        highlight="$WORK_DIR/chapters_highlight.png"
        select="$WORK_DIR/chapters_highlight.png"
        force="yes" >
