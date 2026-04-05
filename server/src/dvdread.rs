@@ -3,7 +3,6 @@
 //! Provides transparent CSS decryption when reading from encrypted DVDs.
 //! Only compiled when `has_dvdread` cfg is set (libdvdread found by pkg-config).
 
-#![cfg(has_dvdread)]
 
 use std::ffi::CString;
 use std::path::Path;

@@ -1,5 +1,11 @@
 import { defineConfig } from "@playwright/test";
 
+const testDisc = process.env.WEBDVD_TEST_DISC ?? "/tmp/webdvd-test/VIDEO_TS";
+const serverBin = process.env.WEBDVD_SERVER_BIN;
+const serverCommand = serverBin
+  ? `${serverBin} ${testDisc}`
+  : `cd ../server && cargo run -- ${testDisc}`;
+
 export default defineConfig({
   testDir: "./e2e",
   timeout: 30_000,
@@ -13,7 +19,7 @@ export default defineConfig({
   // Vite dev server — Playwright starts this automatically
   webServer: [
     {
-      command: "cd ../server && cargo run -- /tmp/webdvd-test/VIDEO_TS",
+      command: serverCommand,
       port: 3000,
       reuseExistingServer: true,
       timeout: 30_000,

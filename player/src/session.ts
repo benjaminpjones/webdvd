@@ -93,6 +93,11 @@ export class SessionManager {
     this.onStateChange?.(state);
   }
 
+  /** Check current state (avoids TS narrowing issues after async calls that mutate _state) */
+  private inState(state: SessionState): boolean {
+    return this._state === state;
+  }
+
   private setMenu(menu: MenuState | null) {
     this._menuState = menu;
     this.onMenuChange?.(menu);
@@ -117,7 +122,7 @@ export class SessionManager {
     let target = await this.driveVM(/* acceptTitles */ false);
     if (target) {
       this.playTarget(target);
-    } else if (this._state === "menu") {
+    } else if (this.inState("menu")) {
       this.loadMenuVideo();
     } else {
       // No menu found via First Play — try jumping directly to the menu.
@@ -126,7 +131,7 @@ export class SessionManager {
       this.log("No menu via First Play — trying menuCall...");
       if (this.session.menuCall(3) || this.session.menuCall(2)) {
         target = await this.driveVM(/* acceptTitles */ false);
-        if (this._state === "menu") {
+        if (this.inState("menu")) {
           this.loadMenuVideo();
           return;
         }
@@ -270,7 +275,7 @@ export class SessionManager {
     this.log("Trying menuCall after VM init...");
     if (this.session.menuCall(3) || this.session.menuCall(2)) {
       const target = await this.driveVM();
-      if (this._state === "menu") {
+      if (this.inState("menu")) {
         this.loadMenuVideo();
         return;
       }

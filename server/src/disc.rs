@@ -219,12 +219,11 @@ impl Disc {
     /// available, otherwise falling back to raw file I/O.
     pub fn read_file(&self, filename: &str) -> anyhow::Result<Vec<u8>> {
         #[cfg(has_dvdread)]
-        if let Some(ref dvdread_mutex) = self.dvdread {
-            if let Some((titlenum, domain)) = dvdread::parse_dvd_filename(filename) {
+        if let Some(ref dvdread_mutex) = self.dvdread
+            && let Some((titlenum, domain)) = dvdread::parse_dvd_filename(filename) {
                 let reader = dvdread_mutex.lock().unwrap();
                 return reader.read_file(titlenum, domain);
             }
-        }
 
         // Fallback: raw file I/O
         let upper = filename.to_uppercase();
@@ -279,8 +278,8 @@ impl Disc {
         let block_count = (end_sector - start_sector + 1) as u32;
 
         #[cfg(has_dvdread)]
-        if let Some(ref dvdread_mutex) = self.dvdread {
-            if let Some((titlenum, domain)) = dvdread::parse_dvd_filename(filename) {
+        if let Some(ref dvdread_mutex) = self.dvdread
+            && let Some((titlenum, domain)) = dvdread::parse_dvd_filename(filename) {
                 let reader = dvdread_mutex.lock().unwrap();
                 let total_size = reader.file_size(titlenum, domain)?;
                 let data = reader.read_vob_blocks(
@@ -288,7 +287,6 @@ impl Disc {
                 )?;
                 return Ok((data, total_size));
             }
-        }
 
         // Fallback: raw file I/O with seeking
         let upper = filename.to_uppercase();

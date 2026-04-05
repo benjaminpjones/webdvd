@@ -29,7 +29,7 @@ interface EmscriptenFS {
 }
 
 interface DvdnavModule {
-  cwrap(name: string, returnType: string | null, argTypes: string[]): Function;
+  cwrap(name: string, returnType: string | null, argTypes: string[]): (...args: unknown[]) => unknown;
   FS: EmscriptenFS;
 }
 
@@ -267,8 +267,8 @@ async function loadDiscFiles(mod: DvdnavModule): Promise<LoadState> {
   if (!ifoRes.ok) throw new Error(`Failed to fetch IFO list: ${ifoRes.statusText}`);
   if (!vobRes.ok) throw new Error(`Failed to fetch VOB list: ${vobRes.statusText}`);
 
-  const ifoFiles: string[] = await ifoRes.json();
-  const allVobs: string[] = await vobRes.json();
+  const ifoFiles = (await ifoRes.json()) as string[];
+  const allVobs = (await vobRes.json()) as string[];
 
   const fetchFile = async (name: string, endpoint: string) => {
     const resp = await fetch(`/api/${endpoint}/${name}`);
@@ -402,6 +402,17 @@ async function loadDiscFiles(mod: DvdnavModule): Promise<LoadState> {
   return { vtsPath, mod, vtsMenuPgcs, loadedSectors, vobBuffers };
 }
 
+/** Raw JSON shape returned by dvd_describe_title() in the C glue */
+interface RawTitleDesc {
+  chapters: number;
+  duration_ms: number;
+  chapter_times_ms: number[];
+  vts: number;
+  vts_ttn: number;
+  firstSector?: number;
+  lastSector?: number;
+}
+
 /** Query disc structure from an open dvdnav handle */
 function queryStructure(dvd: DvdnavBindings): DiscStructure {
   const numTitles = dvd.getNumTitles();
@@ -409,7 +420,7 @@ function queryStructure(dvd: DvdnavBindings): DiscStructure {
 
   for (let t = 1; t <= numTitles; t++) {
     const jsonStr = dvd.describeTitle(t);
-    const info = JSON.parse(jsonStr);
+    const info = JSON.parse(jsonStr) as RawTitleDesc;
     titles.push({
       title: t,
       chapters: info.chapters,
@@ -521,7 +532,7 @@ export class DvdSession {
 
   getNextEvent(): NavEvent {
     const json = this.dvd.getNextEvent();
-    const raw = JSON.parse(json);
+    const raw = JSON.parse(json) as NavEvent & { isVts?: number | boolean };
     const ev: NavEvent = { event: raw.event };
     if (raw.error) ev.error = raw.error;
     if (raw.cellN !== undefined) ev.cellN = raw.cellN;
@@ -589,7 +600,7 @@ export class DvdSession {
   }
 
   getButtons(): ButtonInfo[] {
-    return JSON.parse(this.dvd.getButtons());
+    return JSON.parse(this.dvd.getButtons()) as ButtonInfo[];
   }
 
   buttonActivate(): boolean {

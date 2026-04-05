@@ -16,5 +16,8 @@ anyhow = "1"
 tempfile = "3"
 tokio-util = { version = "0.7", features = ["io"] }
 
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
 [build-dependencies]
 pkg-config = "0.3"

@@ -7,24 +7,42 @@ on:
     branches: [main]
 
 jobs:
-  wasm-smoke-test:
-    name: WASM smoke test
+  rust:
+    name: Rust (check, clippy, test)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
 
-      - uses: mymindstorm/setup-emsdk@v14
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
-      - name: Build WASM
-        run: ./wasm/build.sh
+      - run: cargo check
+      - run: cargo clippy -- -D warnings
+      - run: cargo test
 
-      - name: Install test disc tools
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg dvdauthor
+  player-lint:
+    name: Player (lint, typecheck, unit tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: player
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Generate test disc
-        run: ./scripts/make-test-disc.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: player/package-lock.json
 
-      - name: Run WASM smoke test
-        run: node wasm/test.mjs
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run test:unit

@@ -68,7 +68,7 @@ function buildTitleButtons(structure: DiscStructure, sm: SessionManager) {
     titleBtn.className = "title-btn";
     titleBtn.setAttribute("data-title", String(t.title));
     titleBtn.textContent = `Title ${t.title} (${formatDuration(t.durationMs)})`;
-    titleBtn.addEventListener("click", () => sm.selectTitle(t.title));
+    titleBtn.addEventListener("click", () => void sm.selectTitle(t.title));
     titleSelectEl.appendChild(titleBtn);
   }
 }
@@ -82,12 +82,12 @@ function setupRemote(sm: SessionManager) {
 
   // Enter button
   remoteEl.querySelector("[data-action='enter']")?.addEventListener("click", () => {
-    sm.menuActivate();
+    void sm.menuActivate();
   });
 
   // Menu button (return to root menu, DVD_MENU_Root = 3)
   remoteEl.querySelector("[data-action='menu']")?.addEventListener("click", () => {
-    sm.returnToMenu();
+    void sm.returnToMenu();
   });
 }
 
@@ -114,7 +114,7 @@ function setupKeyboard(sm: SessionManager) {
         break;
       case "Enter":
         e.preventDefault();
-        sm.menuActivate();
+        void sm.menuActivate();
         break;
     }
   });
@@ -125,7 +125,7 @@ function setupOverlayMouse(sm: SessionManager) {
     if (sm.state !== "menu") return;
     const pt = menuOverlay.screenToDvd(e.clientX, e.clientY);
     console.log(`[mouse] click screen=(${e.clientX},${e.clientY}) dvd=${pt ? `(${pt.x},${pt.y})` : "null"}`);
-    if (pt) sm.menuClick(pt.x, pt.y);
+    if (pt) void sm.menuClick(pt.x, pt.y);
   });
 
   let hoverLog = 0;
@@ -192,9 +192,9 @@ async function init() {
     await sm.start();
   } catch (err) {
     console.error("[init] Failed:", err);
-    discInfoEl.textContent = `Error: ${err}`;
+    discInfoEl.textContent = `Error: ${String(err)}`;
     statusEl.textContent = "";
   }
 }
 
-init();
+void init();

@@ -1,0 +1,83 @@
+name: E2E
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    # Monday 9am UTC — weekly integration check
+    - cron: "0 9 * * 1"
+
+jobs:
+  e2e:
+    name: Playwright e2e
+    runs-on: ubuntu-latest
+    steps:
+      # For scheduled runs, skip if no commits in the last 7 days
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      - name: Skip if stale (scheduled only)
+        if: github.event_name == 'schedule'
+        run: |
+          last_commit=$(git log -1 --format=%ct)
+          now=$(date +%s)
+          age=$(( (now - last_commit) / 86400 ))
+          echo "Last commit: ${age} days ago"
+          if [ "$age" -gt 7 ]; then
+            echo "No recent commits — skipping e2e"
+            echo "SKIP=true" >> "$GITHUB_ENV"
+          fi
+
+      - uses: mymindstorm/setup-emsdk@v14
+        if: env.SKIP != 'true'
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: env.SKIP != 'true'
+
+      - uses: actions/setup-node@v4
+        if: env.SKIP != 'true'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: player/package-lock.json
+
+      - name: Build WASM
+        if: env.SKIP != 'true'
+        run: ./wasm/build.sh
+
+      - name: Install test disc tools
+        if: env.SKIP != 'true'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg dvdauthor
+
+      - name: Generate test disc
+        if: env.SKIP != 'true'
+        run: ./scripts/make-test-disc.sh
+
+      - name: WASM smoke test
+        if: env.SKIP != 'true'
+        run: node wasm/test.mjs
+
+      - name: Build server
+        if: env.SKIP != 'true'
+        run: cargo build --release
+        working-directory: server
+
+      - name: Install player deps
+        if: env.SKIP != 'true'
+        run: npm ci
+        working-directory: player
+
+      - name: Install Playwright browsers
+        if: env.SKIP != 'true'
+        run: npx playwright install --with-deps chromium
+        working-directory: player
+
+      - name: Run e2e tests
+        if: env.SKIP != 'true'
+        run: npm test
+        working-directory: player
+        env:
+          WEBDVD_SERVER_BIN: ${{ github.workspace }}/server/target/release/webdvd-server
+          WEBDVD_TEST_DISC: /tmp/webdvd-test/VIDEO_TS

@@ -426,9 +426,8 @@ async fn pipe_raw_files(
         }
 
         // If byte limit reached, stop
-        if let Some(max) = max_bytes {
-            if bytes_written >= max { break; }
-        }
+        if let Some(max) = max_bytes
+            && bytes_written >= max { break; }
     }
 
     Ok(())
