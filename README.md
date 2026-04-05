@@ -93,6 +93,9 @@ cargo run -- /tmp/webdvd-test/VIDEO_TS
 cd player
 npm install
 npm run dev
+
+# 5. Set up pre-commit hook (once per clone)
+git config core.hooksPath .githooks
 ```
 
 Open http://localhost:5173 to watch your DVD. The test disc starts at the root menu — click a button or use the on-screen DVD remote to navigate.
@@ -102,6 +105,12 @@ To use a real DVD, point the server at its `VIDEO_TS` directory instead of the t
 ## Testing
 
 ```bash
+# Unit tests (vitest) — IFO parser + SessionManager state machine
+cd player && npm run test:unit
+
+# Lint + format check
+cd player && npm run lint && npm run format:check
+
 # WASM smoke test — verifies IFO parsing + VM event loop (Node.js, no browser)
 # Requires: test disc generated, WASM built
 node wasm/test.mjs
@@ -119,11 +128,15 @@ npm test
 cd player && npm test
 ```
 
+A pre-commit hook runs Prettier and ESLint on staged files automatically (requires the one-time `git config core.hooksPath .githooks` setup above).
+
 This catches regressions in the WASM glue, VM navigation, menu interaction, server transcoding, and video playback. The e2e suite covers disc structure, menu loading, button highlights, sub-menu navigation, title playback from menus, and title switching.
 
 The test disc includes a VMGM root menu (4 buttons: Title 1, Title 2, Title 4, Chapters) and a VTS chapters sub-menu (3 buttons: Chapter 1, Chapter 2, Main Menu), exercising the full menu↔title flow. Title 4 shares a VTS with Title 2 (two PGCs in one titleset), testing that PGC sector bounds are propagated correctly when a title doesn't start at sector 0.
 
-CI runs the WASM smoke test on every push/PR via GitHub Actions. The smoke test covers VM navigation (the event loop reaches a CELL_CHANGE in VTS domain) but does not test the full browser playback pipeline — that's what the local e2e test is for.
+**CI** runs two workflows:
+- **test.yml** (every push + PR): `cargo check/clippy/test`, `tsc --noEmit`, ESLint, Prettier, vitest unit tests
+- **e2e.yml** (PRs + weekly schedule): full integration — WASM build, test disc, server build, Playwright e2e
 
 ## Project Structure
 
