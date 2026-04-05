@@ -238,9 +238,7 @@ describe("SessionManager", () => {
 
     test("falls back to disc structure on VM error", async () => {
       // VM error for VTS 2 (different from currentVts=0) → fallback
-      const session = createMockSession([
-        evt.vmError("Error opening vtsN=2, domain=3"),
-      ]);
+      const session = createMockSession([evt.vmError("Error opening vtsN=2, domain=3")]);
       const video = createMockVideo();
       const sm = createManager(session, video);
 

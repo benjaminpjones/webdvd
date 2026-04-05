@@ -1,0 +1,3 @@
+#!/bin/sh
+# Run lint-staged on player source files
+cd player && npx lint-staged
