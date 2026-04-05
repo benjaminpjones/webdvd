@@ -66,11 +66,15 @@ Point webdvd at a `VIDEO_TS` folder and relive 1999 in a browser tab.
 
 ## Prerequisites
 
+**Runtime:**
 - [Rust](https://rustup.rs/) (for the server)
 - [Node.js](https://nodejs.org/) >= 18 (for the player)
 - [ffmpeg](https://ffmpeg.org/) (for video transcoding)
 - [Emscripten](https://emscripten.org/docs/getting_started/downloads.html) (for building the WASM module)
-- [dvdauthor](http://dvdauthor.sourceforge.net/) (for generating the test disc — includes `spumux` for menu button highlights)
+
+**Test disc generation** (only needed if regenerating the test disc):
+- [dvdauthor](http://dvdauthor.sourceforge.net/) (includes `spumux` for menu button highlights)
+- ffmpeg with `drawtext` filter (requires freetype) — on macOS: `brew install ffmpeg-full`
 
 ## Quick Start
 

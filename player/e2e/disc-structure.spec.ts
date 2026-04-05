@@ -84,9 +84,9 @@ test.describe("DVD menu navigation", () => {
     await page.goto("/");
     await waitForMenu(page);
 
-    // Root menu should have 4 buttons
+    // Root menu should have 5 buttons
     const menuLogs = logs.filter((l) => l.includes("[session] Menu"));
-    expect(menuLogs.some((l) => l.includes("4 buttons"))).toBe(true);
+    expect(menuLogs.some((l) => l.includes("5 buttons"))).toBe(true);
   });
 
   test("menu button plays title", async ({ page }) => {
@@ -112,7 +112,8 @@ test.describe("DVD menu navigation", () => {
     await page.goto("/");
     await waitForMenu(page);
 
-    // Navigate to "Chapters" button (button 4 — down three times from button 1)
+    // Navigate to "Title 1 Chapters" button (button 5 — down four times from button 1)
+    await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ArrowDown");
@@ -145,7 +146,8 @@ test.describe("DVD menu navigation", () => {
     await page.goto("/");
     await waitForMenu(page);
 
-    // Navigate to "Chapters" sub-menu (button 4)
+    // Navigate to "Title 1 Chapters" sub-menu (button 5)
+    await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ArrowDown");

@@ -168,7 +168,7 @@ async function main() {
       const btns = JSON.parse(getButtons());
       if (btns.length > 0) {
         foundMenu = true;
-        assert(btns.length === 4, `root menu has 4 buttons (got ${btns.length})`);
+        assert(btns.length === 5, `root menu has 5 buttons (got ${btns.length})`);
         break;
       }
     }
