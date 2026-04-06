@@ -278,4 +278,31 @@ test.describe("DVD menu navigation", () => {
 
     expect(nonTransparent).toBeGreaterThan(100);
   });
+
+  test("VTS menu intro PGC navigates to chapters sub-menu", async ({ page }) => {
+    const logs: string[] = [];
+    page.on("console", (msg) => logs.push(msg.text()));
+
+    await page.goto("/#/disc/Test%20Disc");
+    await waitForMenu(page);
+
+    // Navigate to "Title 1 Chapters" button (button 5) and enter VTS 1 menu.
+    // VTS 1 has an intro PGC (non-root) that plays before the chapters sub-menu.
+    // The VM must traverse the intro PGC first, then chain to the chapters menu.
+    // If the intro PGC's VOB sectors are missing (partial loading regression),
+    // the VM would fail to navigate through it.
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+
+    // Should reach the chapters sub-menu (3 buttons) after the intro PGC chains to it
+    await waitForMenu(page);
+    const menuLogs = logs.filter(
+      (l) => l.includes("[session] Menu detected") || l.includes("[session] Menu via"),
+    );
+    // At least 2 menu detections: VMGM root menu + VTS 1 chapters sub-menu
+    expect(menuLogs.length).toBeGreaterThanOrEqual(2);
+  });
 });

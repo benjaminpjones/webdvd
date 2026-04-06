@@ -5,7 +5,8 @@ set -euo pipefail
 # Requires: ffmpeg (with drawtext/freetype), dvdauthor, spumux
 #
 # The test disc has:
-#   - Root menu (VMGM) with 4 buttons: "Title 1", "Title 2", "Title 4", "Chapters"
+#   - Root menu (VMGM) with 5 buttons: "Title 1", "Title 2", "Title 3", "Title 4", "Chapters"
+#   - VTS 1 menu intro (2s purple animation, non-root PGC — tests partial VOB loading)
 #   - Chapters sub-menu (VTS 1 menu) with 3 buttons: "Chapter 1", "Chapter 2", "Main Menu"
 #   - 4 titles across 3 titlesets
 #   - Title 1 (VTS 1, PGC 1): 8s, blue-shifted test pattern, 2 chapters (4s each)
@@ -13,7 +14,8 @@ set -euo pipefail
 #   - Title 3 (VTS 2, PGC 2): 4s, yellow-shifted test pattern, 1 chapter
 #     (second PGC in same titleset as Title 2 — tests PGC sector bounds)
 #   - Title 4 (VTS 3, PGC 1): 6s, red-shifted test pattern, 1 chapter
-#   - First Play PGC goes to root menu
+#   - First Play PGC goes to VMGM root menu
+#   - VTS 1 menu entry plays intro PGC, then chains to chapters sub-menu
 #   - Title post-commands return to root menu
 #   - AC-3 audio on all titles (440Hz, 880Hz, 550Hz, 660Hz — distinguishable by ear)
 #
@@ -130,6 +132,17 @@ drawtext=${DT_BTN}:text='Title 1 Chapters':x=(w-tw)/2:y=360" \
     -target ntsc-dvd \
     -c:a ac3 -b:a 192k \
     "$WORK_DIR/root_menu.mpg"
+
+# VTS 1 menu intro: purple background, plays before chapters sub-menu
+# Tests that partial VOB loading includes non-root menu PGCs (issue #14)
+$FFMPEG -y -loglevel error \
+    -f lavfi -i "color=c=0x442244:s=720x480:r=29.97:d=2,\
+drawtext=${DT_HEADER}:text='VTS 1 MENU INTRO':x=(w-tw)/2:y=200,\
+drawtext=${DT_INFO}:text='This animation plays before the chapters sub-menu':x=(w-tw)/2:y=250" \
+    -f lavfi -i "sine=frequency=220:duration=2" \
+    -target ntsc-dvd \
+    -c:a ac3 -b:a 192k \
+    "$WORK_DIR/vts1_intro.mpg"
 
 # Chapters sub-menu: dark blue-gray to distinguish from root menu
 $FFMPEG -y -loglevel error \
@@ -263,7 +276,11 @@ cat > "$WORK_DIR/dvdauthor.xml" <<XMLEOF
   </vmgm>
   <titleset>
     <menus>
-      <pgc pause="inf">
+      <pgc>
+        <vob file="$WORK_DIR/vts1_intro.mpg" />
+        <post>jump pgc 2;</post>
+      </pgc>
+      <pgc entry="root" pause="inf">
         <vob file="$WORK_DIR/chapters_menu_sub.mpg" pause="inf" />
         <button>jump title 1 chapter 1;</button>
         <button>jump title 1 chapter 2;</button>
@@ -306,7 +323,8 @@ echo "=== Done ==="
 echo "VIDEO_TS directory: $OUT_DIR/VIDEO_TS"
 echo ""
 echo "Disc layout:"
-echo "  Root Menu (VMGM): 4 buttons — Title 1, Title 2, Title 4, Chapters"
+echo "  Root Menu (VMGM): 5 buttons — Title 1, Title 2, Title 3, Title 4, Chapters"
+echo "  VTS 1 Menu Intro: 2s purple animation (non-root PGC, tests partial loading)"
 echo "  Chapters Sub-Menu (VTS 1 menu): 3 buttons — Chapter 1, Chapter 2, Main Menu"
 echo "  Title 1 (VTS 1): 8s, blue test pattern, 2 chapters (440Hz tone)"
 echo "  Title 2 (VTS 2, PGC 1): 10s, green test pattern, 3 chapters (880Hz tone)"

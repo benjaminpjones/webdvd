@@ -381,7 +381,7 @@ async function loadDiscFiles(mod: DvdnavModule, slug: string): Promise<LoadState
   }
 
   // ifo-parser was preloaded in parallel with Phase 1
-  const { parseMenuPgcs, ENTRY_ID_ROOT_MENU } = await ifoParserPromise;
+  const { parseMenuPgcs, mergeRanges } = await ifoParserPromise;
 
   const vtsMenuVobs = allVobs.filter((name) => name.match(/^VTS_\d+_0\.VOB$/));
 
@@ -408,9 +408,8 @@ async function loadDiscFiles(mod: DvdnavModule, slug: string): Promise<LoadState
           vtsMenuPgcs.set(vtsN, pgcs);
         }
 
-        const rootPgc = pgcs.find((p) => p.entryId === ENTRY_ID_ROOT_MENU) ?? pgcs[0];
-        const cellRanges = rootPgc?.cells ?? [];
-        const rootBytes = cellRanges.reduce(
+        const allCells = mergeRanges(pgcs.flatMap((p) => p.cells));
+        const menuBytes = allCells.reduce(
           (sum, r) => sum + (r.lastSector - r.firstSector + 1) * 2048,
           0,
         );
@@ -418,26 +417,26 @@ async function loadDiscFiles(mod: DvdnavModule, slug: string): Promise<LoadState
         const buf = new Uint8Array(totalSize);
         vobBuffers.set(vtsN, buf);
 
-        if (rootBytes > 0 && rootBytes < totalSize * 0.75) {
-          // Fetch only root PGC cells
-          const fetches = cellRanges.map(async (range) => {
+        if (menuBytes > 0 && menuBytes < totalSize * 0.75) {
+          // Fetch cells for all menu PGCs (intro animations, root, submenus).
+          // Sequential to avoid disc seek thrashing on physical drives.
+          let bytesLoaded = 0;
+          for (const range of allCells) {
             const resp = await discFetch(
               `/vob-range/${vobName}?start=${range.firstSector}&end=${range.lastSector}`,
             );
-            if (!resp.ok) return 0;
+            if (!resp.ok) continue;
             const data = new Uint8Array(await resp.arrayBuffer());
             buf.set(data, range.firstSector * 2048);
-            return data.byteLength;
-          });
-          const sizes = await Promise.all(fetches);
-          const bytesLoaded = sizes.reduce((a, b) => a + b, 0);
+            bytesLoaded += data.byteLength;
+          }
 
           mod.FS.writeFile(`${vtsPath}/${vobName}`, buf);
-          loadedSectors.set(vtsN, [...cellRanges]);
+          loadedSectors.set(vtsN, [...allCells]);
 
           const pct = ((bytesLoaded / totalSize) * 100).toFixed(1);
           console.log(
-            `[dvdnav] Loaded ${vobName}: ${bytesLoaded} of ${totalSize} bytes (${pct}%, root PGC only)`,
+            `[dvdnav] Loaded ${vobName}: ${bytesLoaded} of ${totalSize} bytes (${pct}%, all menu PGCs)`,
           );
         } else {
           // Root covers most of VOB — download full
