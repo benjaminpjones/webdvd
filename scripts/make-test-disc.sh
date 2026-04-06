@@ -254,6 +254,7 @@ spumux -v 0 "$WORK_DIR/chapters_spu.xml" < "$WORK_DIR/chapters_menu.mpg" > "$WOR
 
 echo "=== Building DVD structure ==="
 rm -rf "$OUT_DIR"
+mkdir -p "$LIBRARY_ROOT"
 
 # DVD structure:
 #   VMGM: root menu with 5 buttons → Title 1, Title 2, Title 3, Title 4, Title 1 Chapters

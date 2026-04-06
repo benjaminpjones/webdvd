@@ -13,63 +13,63 @@ describe("mergeRanges", () => {
   });
 
   test("returns single range unchanged", () => {
-    expect(mergeRanges([{ firstSector: 10, lastSector: 20 }])).toEqual([
-      { firstSector: 10, lastSector: 20 },
+    expect(mergeRanges([{ firstSector: 10, lastSector: 20, durationMs: 0 }])).toEqual([
+      { firstSector: 10, lastSector: 20, durationMs: 0 },
     ]);
   });
 
   test("merges overlapping ranges", () => {
     const result = mergeRanges([
-      { firstSector: 0, lastSector: 10 },
-      { firstSector: 5, lastSector: 15 },
+      { firstSector: 0, lastSector: 10, durationMs: 100 },
+      { firstSector: 5, lastSector: 15, durationMs: 100 },
     ]);
-    expect(result).toEqual([{ firstSector: 0, lastSector: 15 }]);
+    expect(result).toEqual([{ firstSector: 0, lastSector: 15, durationMs: 200 }]);
   });
 
   test("merges adjacent ranges", () => {
     const result = mergeRanges([
-      { firstSector: 0, lastSector: 10 },
-      { firstSector: 11, lastSector: 20 },
+      { firstSector: 0, lastSector: 10, durationMs: 100 },
+      { firstSector: 11, lastSector: 20, durationMs: 100 },
     ]);
-    expect(result).toEqual([{ firstSector: 0, lastSector: 20 }]);
+    expect(result).toEqual([{ firstSector: 0, lastSector: 20, durationMs: 200 }]);
   });
 
   test("keeps non-overlapping ranges separate", () => {
     const result = mergeRanges([
-      { firstSector: 0, lastSector: 10 },
-      { firstSector: 20, lastSector: 30 },
+      { firstSector: 0, lastSector: 10, durationMs: 100 },
+      { firstSector: 20, lastSector: 30, durationMs: 100 },
     ]);
     expect(result).toEqual([
-      { firstSector: 0, lastSector: 10 },
-      { firstSector: 20, lastSector: 30 },
+      { firstSector: 0, lastSector: 10, durationMs: 100 },
+      { firstSector: 20, lastSector: 30, durationMs: 100 },
     ]);
   });
 
   test("sorts unsorted input", () => {
     const result = mergeRanges([
-      { firstSector: 20, lastSector: 30 },
-      { firstSector: 0, lastSector: 10 },
+      { firstSector: 20, lastSector: 30, durationMs: 100 },
+      { firstSector: 0, lastSector: 10, durationMs: 100 },
     ]);
     expect(result).toEqual([
-      { firstSector: 0, lastSector: 10 },
-      { firstSector: 20, lastSector: 30 },
+      { firstSector: 0, lastSector: 10, durationMs: 100 },
+      { firstSector: 20, lastSector: 30, durationMs: 100 },
     ]);
   });
 
   test("merges multiple overlapping ranges into one", () => {
     const result = mergeRanges([
-      { firstSector: 0, lastSector: 5 },
-      { firstSector: 3, lastSector: 10 },
-      { firstSector: 8, lastSector: 20 },
+      { firstSector: 0, lastSector: 5, durationMs: 50 },
+      { firstSector: 3, lastSector: 10, durationMs: 50 },
+      { firstSector: 8, lastSector: 20, durationMs: 50 },
     ]);
-    expect(result).toEqual([{ firstSector: 0, lastSector: 20 }]);
+    expect(result).toEqual([{ firstSector: 0, lastSector: 20, durationMs: 150 }]);
   });
 });
 
 describe("isSectorRangeLoaded", () => {
   const loaded: CellRange[] = [
-    { firstSector: 0, lastSector: 100 },
-    { firstSector: 200, lastSector: 300 },
+    { firstSector: 0, lastSector: 100, durationMs: 0 },
+    { firstSector: 200, lastSector: 300, durationMs: 0 },
   ];
 
   test("returns true when fully contained", () => {
@@ -167,8 +167,8 @@ describe("parseMenuPgcs", () => {
     expect(pgcs).toHaveLength(1);
     expect(pgcs[0].entryId).toBe(ENTRY_ID_ROOT_MENU);
     expect(pgcs[0].cells).toEqual([
-      { firstSector: 0, lastSector: 50 },
-      { firstSector: 100, lastSector: 200 },
+      { firstSector: 0, lastSector: 50, durationMs: 0 },
+      { firstSector: 100, lastSector: 200, durationMs: 0 },
     ]);
   });
 });

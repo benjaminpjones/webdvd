@@ -446,7 +446,9 @@ async function loadDiscFiles(mod: DvdnavModule, slug: string): Promise<LoadState
           buf.set(data);
           mod.FS.writeFile(`${vtsPath}/${vobName}`, buf);
           const totalSectors = Math.ceil(data.byteLength / 2048);
-          loadedSectors.set(vtsN, [{ firstSector: 0, lastSector: totalSectors - 1 }]);
+          loadedSectors.set(vtsN, [
+            { firstSector: 0, lastSector: totalSectors - 1, durationMs: 0 },
+          ]);
           console.log(`[dvdnav] Loaded ${vobName} (${data.byteLength} bytes)`);
         }
       } else {
@@ -458,7 +460,9 @@ async function loadDiscFiles(mod: DvdnavModule, slug: string): Promise<LoadState
           mod.FS.writeFile(`${vtsPath}/${vobName}`, data);
           vobBuffers.set(vtsN, data);
           const totalSectors = Math.ceil(data.byteLength / 2048);
-          loadedSectors.set(vtsN, [{ firstSector: 0, lastSector: totalSectors - 1 }]);
+          loadedSectors.set(vtsN, [
+            { firstSector: 0, lastSector: totalSectors - 1, durationMs: 0 },
+          ]);
           console.log(`[dvdnav] Loaded ${vobName} (${data.byteLength} bytes)`);
         }
         // Parse IFO for on-demand metadata
@@ -599,7 +603,7 @@ export class DvdSession {
     }
 
     // Track the newly loaded range
-    loaded.push({ firstSector, lastSector });
+    loaded.push({ firstSector, lastSector, durationMs: 0 });
     this.loadState.loadedSectors.set(vtsN, mergeRanges(loaded));
 
     console.log(
