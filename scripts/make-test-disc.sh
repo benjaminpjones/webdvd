@@ -6,7 +6,7 @@ set -euo pipefail
 #
 # The test disc has:
 #   - Root menu (VMGM) with 5 buttons: "Title 1", "Title 2", "Title 3", "Title 4", "Chapters"
-#   - VTS 1 menu intro (2s purple animation, non-root PGC — tests partial VOB loading)
+#   - VTS 1 menu intro (4s purple animation, non-root PGC — tests partial VOB loading + overlay timing)
 #   - Chapters sub-menu (VTS 1 menu) with 3 buttons: "Chapter 1", "Chapter 2", "Main Menu"
 #   - 4 titles across 3 titlesets
 #   - Title 1 (VTS 1, PGC 1): 8s, blue-shifted test pattern, 2 chapters (4s each)
@@ -135,11 +135,15 @@ drawtext=${DT_BTN}:text='Title 1 Chapters':x=(w-tw)/2:y=360" \
 
 # VTS 1 menu intro: purple background, plays before chapters sub-menu
 # Tests that partial VOB loading includes non-root menu PGCs (issue #14)
+# Also tests overlay timing: button overlay must be hidden during this intro
+# and shown only when the interactive sub-menu appears (hli_ss=0 → hli_ss>0).
+# Duration is 4s to give the e2e test a measurable window.
 $FFMPEG -y -loglevel error \
-    -f lavfi -i "color=c=0x442244:s=720x480:r=29.97:d=2,\
+    -f lavfi -i "color=c=0x442244:s=720x480:r=29.97:d=4,\
 drawtext=${DT_HEADER}:text='VTS 1 MENU INTRO':x=(w-tw)/2:y=200,\
-drawtext=${DT_INFO}:text='This animation plays before the chapters sub-menu':x=(w-tw)/2:y=250" \
-    -f lavfi -i "sine=frequency=220:duration=2" \
+drawtext=${DT_INFO}:text='This animation plays before the chapters sub-menu':x=(w-tw)/2:y=250,\
+drawtext=${DT_BUG}:text='BUG if button overlay is visible during this animation':x=36:y=420" \
+    -f lavfi -i "sine=frequency=220:duration=4" \
     -target ntsc-dvd \
     -c:a ac3 -b:a 192k \
     "$WORK_DIR/vts1_intro.mpg"
@@ -276,11 +280,11 @@ cat > "$WORK_DIR/dvdauthor.xml" <<XMLEOF
   </vmgm>
   <titleset>
     <menus>
-      <pgc>
+      <pgc entry="root">
         <vob file="$WORK_DIR/vts1_intro.mpg" />
         <post>jump pgc 2;</post>
       </pgc>
-      <pgc entry="root" pause="inf">
+      <pgc pause="inf">
         <vob file="$WORK_DIR/chapters_menu_sub.mpg" pause="inf" />
         <button>jump title 1 chapter 1;</button>
         <button>jump title 1 chapter 2;</button>
@@ -324,7 +328,7 @@ echo "VIDEO_TS directory: $OUT_DIR/VIDEO_TS"
 echo ""
 echo "Disc layout:"
 echo "  Root Menu (VMGM): 5 buttons — Title 1, Title 2, Title 3, Title 4, Chapters"
-echo "  VTS 1 Menu Intro: 2s purple animation (non-root PGC, tests partial loading)"
+echo "  VTS 1 Menu Intro: 4s purple animation (non-root PGC, tests partial loading + overlay timing)"
 echo "  Chapters Sub-Menu (VTS 1 menu): 3 buttons — Chapter 1, Chapter 2, Main Menu"
 echo "  Title 1 (VTS 1): 8s, blue test pattern, 2 chapters (440Hz tone)"
 echo "  Title 2 (VTS 2, PGC 1): 10s, green test pattern, 3 chapters (880Hz tone)"

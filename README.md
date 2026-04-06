@@ -229,6 +229,7 @@ Some DVDs interleave multiple angles at the VOBU level within a single VOB — e
 - [x] On-screen DVD remote (arrows, OK, Menu)
 - [x] Subpicture stream parsing and RLE decoding
 - [x] Per-PGC partial VOB loading (large menu VOBs load only the root PGC's cells; sub-menu cells fetched on demand at CELL_CHANGE)
+- [x] Menu intro animation support (overlay hidden during intro, shown when NAV pack PCI `hli_ss` indicates active highlights)
 
 ### M4: Full Experience
 - [ ] Subtitle rendering during playback

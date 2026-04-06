@@ -25,6 +25,17 @@ import {
 import { demuxSubpictures } from "./spu-demux";
 import { decodeSpuPacket, type SpuImage } from "./spu-decode";
 
+/** Read big-endian uint32 from a Uint8Array */
+function readU32(data: Uint8Array, offset: number): number {
+  return (
+    ((data[offset] << 24) |
+      (data[offset + 1] << 16) |
+      (data[offset + 2] << 8) |
+      data[offset + 3]) >>>
+    0
+  );
+}
+
 export interface PlaybackTarget {
   vts: number;
   title: number;
@@ -52,8 +63,9 @@ export class SessionManager {
   private currentVts = 0;
   private currentTitle = 0;
   private currentPart = 0;
-  private menuFirstSector = 0; // VOB-absolute sector of the current menu cell
+  private menuFirstSector = 0; // VOB-absolute sector where menu video starts (may include intro)
   private menuLastSector = 0; // VOB-absolute last sector of the current menu cell
+  private menuButtonSector = 0; // VOB-absolute sector where buttons appear (interactive portion)
   private _state: SessionState = "idle";
   private _menuState: MenuState | null = null;
   private onStateChange: ((state: SessionState) => void) | null = null;
@@ -368,8 +380,10 @@ export class SessionManager {
   }
 
   /**
-   * Load the menu background video. Seeks to the current menu PGC's cell
-   * position so sub-menus (e.g. Scene Selection) show the correct video.
+   * Load the menu background video. Plays the full sector range (intro +
+   * interactive) as a single transcoded video. If there's an intro animation
+   * (menuButtonSector > menuFirstSector), the overlay is hidden until the
+   * intro cells finish, using IFO cell playback durations for timing.
    */
   private loadMenuVideo(): void {
     let url = `${this.apiBase}/transcode-menu/${this.currentVts}`;
@@ -389,12 +403,130 @@ export class SessionManager {
     this.video.muted = false;
     this.video.loop = false;
     this.video.load();
-    // Animated menus: loop back to start when video ends
-    this.video.onended = () => {
-      this.video.currentTime = 0;
-      this.video.play().catch(() => {});
-    };
+
+    // Scan NAV packs in the VOB to find when buttons first appear.
+    // This reads the actual PCI highlight data from the disc, matching
+    // how a real DVD player discovers button activation timing.
+    const introEndSec = this.menuButtonSector > this.menuFirstSector ? this.getButtonStartPts() : 0;
+    if (introEndSec > 0) {
+      const savedMenu = this._menuState;
+      this.setMenu(null); // hide overlay during intro
+      this.log(`Intro: ${introEndSec.toFixed(1)}s until buttons (from NAV pack PTS)`);
+
+      const onTimeUpdate = () => {
+        if (this.video.currentTime >= introEndSec) {
+          this.video.removeEventListener("timeupdate", onTimeUpdate);
+          this.log(`Intro finished at ${this.video.currentTime.toFixed(1)}s — showing overlay`);
+          this.setMenu(savedMenu);
+        }
+      };
+      this.video.addEventListener("timeupdate", onTimeUpdate);
+
+      // Loop from the interactive portion when video ends
+      this.video.onended = () => {
+        this.video.currentTime = introEndSec;
+        this.video.play().catch(() => {});
+      };
+    } else {
+      // No intro — loop the whole video
+      this.video.loop = true;
+      this.video.onended = null;
+    }
     this.video.play().catch(() => {});
+  }
+
+  /**
+   * Scan NAV packs in the menu VOB to find when buttons become visible.
+   *
+   * DVD PCI (Presentation Control Information) in each VOBU's NAV pack
+   * defines buttons and their display timing:
+   *   - btn_ns: number of buttons (0 = none)
+   *   - hli_s_ptm: PTS when highlights should start displaying
+   *   - vobu_s_ptm: PTS of this VOBU
+   *
+   * A real DVD player shows buttons when vobu_s_ptm >= hli_s_ptm.
+   * Returns the highlight start time in seconds relative to the menu
+   * video start, or 0 if no buttons found / VOB data unavailable.
+   */
+  private getButtonStartPts(): number {
+    const vobData = this.session.getMenuVobData(
+      this.currentVts,
+      this.menuFirstSector,
+      this.menuLastSector,
+    );
+    if (!vobData || vobData.length === 0) return 0;
+
+    // PCI layout (offsets from PCI data start, per nav_types.h):
+    //   pci_gi_t (0x3C bytes): vobu_s_ptm at +0x0C
+    //   nsml_agli_t (0x24 bytes)
+    //   hl_gi_t: hli_ss +0x00, hli_s_ptm +0x02, hli_e_ptm +0x06,
+    //            btn_se_e_ptm +0x0A, bitfields +0x0E, btn_ofn +0x10, btn_ns +0x11
+    // Absolute from PCI start: vobu_s_ptm=0x0C, hli_ss=0x60, hli_s_ptm=0x62, btn_ns=0x71
+    const SECTOR_SIZE = 2048;
+    // Track PTS across PGC boundaries. Multi-PGC menus (intro PGC + interactive PGC)
+    // reset vobu_s_ptm at each PGC start. We accumulate time across resets.
+    let pgcBasePts = 0; // accumulated PTS from completed PGCs
+    let pgcFirstPts = -1; // first vobu_s_ptm of current PGC
+    let prevVobuPts = -1;
+
+    for (let offset = 0; offset + SECTOR_SIZE <= vobData.length; offset += SECTOR_SIZE) {
+      // Pack header: 00 00 01 BA
+      if (
+        vobData[offset] !== 0x00 ||
+        vobData[offset + 1] !== 0x00 ||
+        vobData[offset + 2] !== 0x01 ||
+        vobData[offset + 3] !== 0xba
+      )
+        continue;
+
+      const stuffing = vobData[offset + 13] & 0x07;
+      let pos = offset + 14 + stuffing;
+
+      // Walk PES packets to find the first 0xBF (PCI)
+      while (pos + 6 < offset + SECTOR_SIZE) {
+        if (vobData[pos] !== 0x00 || vobData[pos + 1] !== 0x00 || vobData[pos + 2] !== 0x01) break;
+        const streamId = vobData[pos + 3];
+        const pesLen = (vobData[pos + 4] << 8) | vobData[pos + 5];
+
+        if (streamId === 0xbf) {
+          // First byte after PES header is substream ID: 0x00=PCI, 0x01=DSI
+          if (vobData[pos + 6] !== 0x00) {
+            pos += 6 + pesLen;
+            continue;
+          }
+          const pci = pos + 7; // skip PES header (6) + substream ID (1)
+          if (pci + 0x72 > offset + SECTOR_SIZE) break;
+
+          const vobuPtm = readU32(vobData, pci + 0x0c);
+
+          // Detect PTS reset (new PGC) — vobu_s_ptm drops significantly
+          if (prevVobuPts >= 0 && vobuPtm < prevVobuPts - 45000) {
+            pgcBasePts += prevVobuPts - pgcFirstPts;
+            pgcFirstPts = vobuPtm;
+          }
+          if (pgcFirstPts < 0) pgcFirstPts = vobuPtm;
+          prevVobuPts = vobuPtm;
+
+          // hli_ss (2 bytes at PCI+0x60): 0=no buttons, 1=different, 2=equal, 3=equal except cmds
+          const hliSs = (vobData[pci + 0x60] << 8) | vobData[pci + 0x61];
+          const btnNs = vobData[pci + 0x71];
+
+          if (btnNs > 0 && hliSs > 0) {
+            // This VOBU has active button highlights — intro animation is over.
+            const effectivePts = pgcBasePts + (vobuPtm - pgcFirstPts);
+            const seconds = effectivePts / 90000;
+            this.log(
+              `NAV scan: first active highlight at VOBU pts=${vobuPtm}, hli_ss=${hliSs}, ${btnNs} buttons (${seconds.toFixed(1)}s from menu start)`,
+            );
+            return Math.max(0, seconds);
+          }
+          break; // only check first 0xBF per sector (PCI, not DSI)
+        }
+        pos += 6 + pesLen;
+      }
+    }
+    this.log("NAV scan: no buttons found in VOB data");
+    return 0;
   }
 
   /**
@@ -418,6 +550,7 @@ export class SessionManager {
     // until the VM processes the button's jump command.
     let awaitingTransition = postActivation;
     const startVts = this.currentVts; // VTS before this driveVM call
+    let firstMenuCellSector = -1; // first menu cell sector (for intro animations)
     const MAX_ROUNDS = 500;
 
     for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -500,6 +633,13 @@ export class SessionManager {
             lastMenuLastSector = ev.lastSector ?? 0;
             menuCellsSinceHop++;
 
+            // Track the first menu cell — intro animations precede the
+            // interactive menu, so the first cell's sector is where the
+            // menu video should start (even if it has no buttons yet).
+            if (firstMenuCellSector < 0) {
+              firstMenuCellSector = lastMenuSector;
+            }
+
             // On-demand: fetch cell sectors if not yet loaded in MEMFS
             if (lastMenuLastSector > 0 && this.currentVts > 0) {
               const fetched = await this.session.ensureMenuCellLoaded(
@@ -522,18 +662,28 @@ export class SessionManager {
               this.log(
                 `Menu cell skip (cellsSinceHop=${menuCellsSinceHop}, awaitingTransition=${awaitingTransition})`,
               );
+              // PCI is stale so we can't check buttons. Tentatively mark as
+              // intro — if the next cell (with fresh PCI) has buttons, this
+              // was indeed an intro cell. If not, it gets superseded.
               continue;
             }
 
             const buttons = this.session.getButtons();
             if (buttons.length > 0) {
+              // If buttons appear on the first cell after the hop guard,
+              // the hop-guarded cell(s) were likely the interactive menu
+              // itself (PCI was just stale). Don't treat them as intro.
               let currentButton = this.session.getCurrentButton();
               // Clamp stale highlight to valid range
               if (currentButton < 1 || currentButton > buttons.length) {
                 currentButton = 1;
               }
-              this.menuFirstSector = lastMenuSector;
+              // Start the menu video from the first cell (which may be an
+              // intro animation before the interactive portion).
+              this.menuFirstSector =
+                firstMenuCellSector >= 0 ? firstMenuCellSector : lastMenuSector;
               this.menuLastSector = lastMenuLastSector;
+              this.menuButtonSector = lastMenuSector;
               this.log(
                 `Menu detected via CELL_CHANGE: ${buttons.length} buttons, current=${currentButton}, sector=${this.menuFirstSector}-${this.menuLastSector}`,
               );
@@ -541,6 +691,10 @@ export class SessionManager {
               this.setState("menu");
               return null;
             }
+            // No buttons but PCI is fresh — the cell genuinely has no
+            // buttons. Don't track as intro: the visual menu content may
+            // already be visible (e.g. background animation playing before
+            // button regions are defined in a later cell's NAV packs).
           }
           continue;
 
@@ -563,8 +717,9 @@ export class SessionManager {
             if (currentButton < 1 || currentButton > stillButtons.length) {
               currentButton = 1;
             }
-            this.menuFirstSector = lastMenuSector;
+            this.menuFirstSector = firstMenuCellSector >= 0 ? firstMenuCellSector : lastMenuSector;
             this.menuLastSector = lastMenuLastSector;
+            this.menuButtonSector = lastMenuSector;
             this.log(
               `Menu via STILL_FRAME (${ev.stillLength === 0xff ? "infinite" : ev.stillLength + "s"}): ${stillButtons.length} buttons, current=${currentButton}, sector=${this.menuFirstSector}-${this.menuLastSector}`,
             );
@@ -605,8 +760,9 @@ export class SessionManager {
             if (currentButton < 1 || currentButton > hlButtons.length) {
               currentButton = 1;
             }
-            this.menuFirstSector = lastMenuSector;
+            this.menuFirstSector = firstMenuCellSector >= 0 ? firstMenuCellSector : lastMenuSector;
             this.menuLastSector = lastMenuLastSector;
+            this.menuButtonSector = lastMenuSector;
             this.log(
               `Menu detected via HIGHLIGHT: ${hlButtons.length} buttons, current=${currentButton}, sector=${this.menuFirstSector}-${this.menuLastSector}`,
             );
@@ -643,6 +799,7 @@ export class SessionManager {
         case DVDNAV_HOP_CHANNEL:
           this.log("Hop channel (decoder flush)");
           menuCellsSinceHop = 0;
+          firstMenuCellSector = -1;
           awaitingTransition = false;
           continue;
 

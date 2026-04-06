@@ -305,4 +305,53 @@ test.describe("DVD menu navigation", () => {
     // At least 2 menu detections: VMGM root menu + VTS 1 chapters sub-menu
     expect(menuLogs.length).toBeGreaterThanOrEqual(2);
   });
+
+  test("menu intro hides overlay until buttons are active (NAV pack hli_ss)", async ({ page }) => {
+    const logs: string[] = [];
+    page.on("console", (msg) => logs.push(msg.text()));
+
+    await page.goto("/#/disc/Test%20Disc");
+    await waitForMenu(page);
+
+    // Navigate to VTS 1 menu (has a 4s intro PGC before the interactive sub-menu).
+    // The button overlay should be hidden during the intro animation and shown
+    // only after the intro ends, based on NAV pack PCI hli_ss field scanning.
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+
+    // Wait for the VTS 1 chapters sub-menu to appear. We need to wait for
+    // a state transition (Menu → loading → Menu) since we're already in Menu.
+    // Look for the NAV scan log which fires during loadMenuVideo.
+    await page.waitForFunction(
+      () => {
+        // The intro detection log appears in console before the menu settles.
+        // Wait for it by checking if session has loaded the VTS menu video.
+        const status = document.getElementById("status")?.textContent;
+        return status === "Menu";
+      },
+      { timeout: 30_000 },
+    );
+    // Give the logs time to arrive after the menu settles
+    await page.waitForTimeout(500);
+
+    // Verify NAV scan detected the intro duration from PCI highlight data.
+    // The log should show "Intro: Xs until buttons (from NAV pack PTS)" where X > 0.
+    const introLog = logs.find((l) => l.includes("Intro:") && l.includes("until buttons"));
+    expect(introLog).toBeTruthy();
+
+    // Extract the detected intro duration — should be > 0 (intro exists)
+    const match = introLog!.match(/Intro: ([\d.]+)s/);
+    expect(match).toBeTruthy();
+    const introSec = parseFloat(match![1]);
+    expect(introSec).toBeGreaterThan(0);
+
+    // Verify the NAV scan log shows correct fields
+    const navScanLog = logs.find((l) => l.includes("NAV scan: first active highlight"));
+    expect(navScanLog).toBeTruthy();
+    expect(navScanLog).toContain("hli_ss=");
+    expect(navScanLog).toContain("buttons");
+  });
 });

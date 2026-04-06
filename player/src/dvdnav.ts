@@ -748,6 +748,18 @@ export class DvdSession {
     return buf.subarray(startByte, Math.min(endByte, buf.length));
   }
 
+  /**
+   * Get the raw (unmerged) cell ranges for all menu PGCs in a VTS.
+   * Each cell has firstSector, lastSector, and durationMs from the IFO.
+   * Returns null if IFO data isn't available for this VTS.
+   */
+  getMenuCellTimings(vtsN: number): import("./ifo-parser").CellRange[] | null {
+    if (!this.loadState) return null;
+    const pgcs = this.loadState.vtsMenuPgcs.get(vtsN);
+    if (!pgcs) return null;
+    return pgcs.flatMap((p) => p.rawCells);
+  }
+
   /** Reset the VM to First Play PGC state (close + reopen) */
   reset(): void {
     this.dvd.close();
