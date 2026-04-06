@@ -36,7 +36,7 @@ function showLibrary(discs: LibraryDisc[]) {
 
     const thumb = document.createElement("div");
     thumb.className = "disc-thumb";
-    thumb.textContent = "\uD83D\uDCC0"; // disc emoji as placeholder
+    thumb.textContent = "\uD83D\uDCBF";
     card.appendChild(thumb);
 
     const title = document.createElement("div");

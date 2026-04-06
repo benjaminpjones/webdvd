@@ -17,7 +17,7 @@ test.describe("DVD disc structure via WASM", () => {
       if (msg.type() === "error") errors.push(msg.text());
     });
 
-    await page.goto("/");
+    await page.goto("/#/disc/Test%20Disc");
 
     const discStructure = page.locator("#disc-structure");
     await expect(discStructure).not.toHaveText("Loading disc structure (WASM)...", {
@@ -56,7 +56,7 @@ test.describe("DVD disc structure via WASM", () => {
   });
 
   test("displays disc info from session", async ({ page }) => {
-    await page.goto("/");
+    await page.goto("/#/disc/Test%20Disc");
 
     const discInfo = page.locator("#disc-info");
     await expect(discInfo).not.toHaveText("Loading disc info...", {
@@ -67,7 +67,7 @@ test.describe("DVD disc structure via WASM", () => {
   });
 
   test("title buttons are rendered", async ({ page }) => {
-    await page.goto("/");
+    await page.goto("/#/disc/Test%20Disc");
 
     const btn = page.locator(".title-btn").first();
     await expect(btn).toBeVisible({ timeout: 15_000 });
@@ -80,7 +80,7 @@ test.describe("DVD menu navigation", () => {
     const logs: string[] = [];
     page.on("console", (msg) => logs.push(msg.text()));
 
-    await page.goto("/");
+    await page.goto("/#/disc/Test%20Disc");
     await waitForMenu(page);
 
     // Root menu should have 5 buttons
@@ -89,7 +89,7 @@ test.describe("DVD menu navigation", () => {
   });
 
   test("menu button plays title", async ({ page }) => {
-    await page.goto("/");
+    await page.goto("/#/disc/Test%20Disc");
     await waitForMenu(page);
 
     const status = page.locator("#status");
@@ -108,7 +108,7 @@ test.describe("DVD menu navigation", () => {
     const logs: string[] = [];
     page.on("console", (msg) => logs.push(msg.text()));
 
-    await page.goto("/");
+    await page.goto("/#/disc/Test%20Disc");
     await waitForMenu(page);
 
     // Navigate to "Title 1 Chapters" button (button 5 — down four times from button 1)
@@ -141,7 +141,7 @@ test.describe("DVD menu navigation", () => {
     const logs: string[] = [];
     page.on("console", (msg) => logs.push(msg.text()));
 
-    await page.goto("/");
+    await page.goto("/#/disc/Test%20Disc");
     await waitForMenu(page);
 
     // Navigate to "Title 1 Chapters" sub-menu (button 5)
@@ -168,7 +168,7 @@ test.describe("DVD menu navigation", () => {
     const logs: string[] = [];
     page.on("console", (msg) => logs.push(msg.text()));
 
-    await page.goto("/");
+    await page.goto("/#/disc/Test%20Disc");
     await waitForMenu(page);
 
     // Phase 1 should have loaded IFOs + VMGM VOB only
@@ -184,7 +184,7 @@ test.describe("DVD menu navigation", () => {
   });
 
   test("title switching from menu changes video source", async ({ page }) => {
-    await page.goto("/");
+    await page.goto("/#/disc/Test%20Disc");
     await waitForMenu(page);
 
     const status = page.locator("#status");
@@ -215,7 +215,7 @@ test.describe("DVD menu navigation", () => {
     const logs: string[] = [];
     page.on("console", (msg) => logs.push(msg.text()));
 
-    await page.goto("/");
+    await page.goto("/#/disc/Test%20Disc");
     await waitForMenu(page);
 
     const status = page.locator("#status");
@@ -256,7 +256,7 @@ test.describe("DVD menu navigation", () => {
   });
 
   test("menu renders subpicture overlay on canvas", async ({ page }) => {
-    await page.goto("/");
+    await page.goto("/#/disc/Test%20Disc");
     await waitForMenu(page);
 
     // The test disc has SPU subpictures with gray button outlines (normal state).

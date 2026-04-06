@@ -23,6 +23,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/disc/{slug}/vob-range/{filename}", get(vob_range))
         .route("/api/disc/{slug}/vob-size/{filename}", get(vob_size))
         .route("/api/disc/{slug}/transcode-menu/{titleset}", get(transcode_menu))
+        // TODO: /api/disc/{slug}/thumbnail — see GitHub issue for metadata/cover art
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -240,3 +241,4 @@ async fn transcode_titleset(
         body,
     ))
 }
+
