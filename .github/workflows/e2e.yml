@@ -81,4 +81,4 @@ jobs:
         working-directory: player
         env:
           WEBDVD_SERVER_BIN: ${{ github.workspace }}/server/target/release/webdvd-server
-          WEBDVD_TEST_DISC: /tmp/webdvd-test/VIDEO_TS
+          WEBDVD_TEST_DISC: /tmp/webdvd-test
