@@ -83,9 +83,9 @@ test.describe("DVD menu navigation", () => {
     await page.goto("/#/disc/Test%20Disc");
     await waitForMenu(page);
 
-    // Root menu should have 5 buttons
+    // Root menu should have 6 buttons (Title 1..4, Chapters, Bonus)
     const menuLogs = logs.filter((l) => l.includes("[session] Menu"));
-    expect(menuLogs.some((l) => l.includes("5 buttons"))).toBe(true);
+    expect(menuLogs.some((l) => l.includes("6 buttons"))).toBe(true);
   });
 
   test("menu button plays title", async ({ page }) => {
@@ -277,6 +277,58 @@ test.describe("DVD menu navigation", () => {
     });
 
     expect(nonTransparent).toBeGreaterThan(100);
+  });
+
+  test("direct VMGM→VMGM transition primes PCI before menu is emitted", async ({ page }) => {
+    // Regression test for the NES Scene Selections bug. When a root menu
+    // button jumps directly to another menu PGC (no intro in between),
+    // libdvdnav emits a HIGHLIGHT event between CELL_CHANGE and the new
+    // cell's first NAV pack — at that moment PCI still holds the outgoing
+    // menu's buttons. If we flush the deferred CELL_CHANGE on that stale
+    // HIGHLIGHT, JS sees the wrong button count for the incoming menu
+    // and button navigation fails (dvdnav_button_* return ERR because
+    // the links reference buttons that don't exist in the stale PCI).
+    //
+    // This test exercises VMGM PGC 1 (root, 6 buttons) → VMGM PGC 2
+    // (Bonus, 2 buttons). Verifies: (a) the sub-menu is detected with 2
+    // buttons, not 6; (b) button navigation inside the sub-menu works.
+    const logs: string[] = [];
+    page.on("console", (msg) => logs.push(msg.text()));
+
+    await page.goto("/#/disc/Test%20Disc");
+    await waitForMenu(page);
+
+    // Navigate to "Bonus" button (button 6 — down 5 times from button 1) and activate.
+    for (let i = 0; i < 5; i++) await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+
+    await waitForMenu(page);
+
+    // The Bonus menu log must report exactly 2 buttons. If the bug is
+    // present, JS would see 6 (stale root menu PCI) or some other wrong
+    // count depending on whether HIGHLIGHT or NAV pack order flushes first.
+    const bonusDetection = logs.find((l) =>
+      l.includes("[session] Menu detected via CELL_CHANGE: 2 buttons"),
+    );
+    expect(bonusDetection).toBeTruthy();
+
+    // Navigation must work inside the Bonus menu: Down should move from
+    // button 1 to button 2. If PCI is stale, the nav link would point to
+    // a non-existent button and buttonSelect would return false.
+    logs.length = 0;
+    await page.keyboard.press("ArrowDown");
+    const navLog = logs.find((l) => l.includes("[session] Navigate down"));
+    expect(navLog).toContain("ok=true");
+    expect(navLog).toContain("button 1→2");
+
+    // Activating button 2 ("Main Menu") should return to the root menu.
+    await page.keyboard.press("Enter");
+    await waitForMenu(page);
+    const backToRoot = logs
+      .slice()
+      .reverse()
+      .find((l) => l.includes("[session] Menu detected via CELL_CHANGE"));
+    expect(backToRoot).toContain("6 buttons");
   });
 
   test("VTS menu intro PGC navigates to chapters sub-menu", async ({ page }) => {

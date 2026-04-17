@@ -5,7 +5,10 @@ set -euo pipefail
 # Requires: ffmpeg (with drawtext/freetype), dvdauthor, spumux
 #
 # The test disc has:
-#   - Root menu (VMGM) with 5 buttons: "Title 1", "Title 2", "Title 3", "Title 4", "Chapters"
+#   - Root menu (VMGM PGC 1) with 6 buttons: "Title 1", "Title 2", "Title 3", "Title 4", "Chapters", "Bonus"
+#   - Bonus menu (VMGM PGC 2) with 2 buttons: "Play Title 1", "Main Menu"
+#     (direct VMGM→VMGM transition with different button count — tests
+#      that PCI button data is primed before JS sees the menu)
 #   - VTS 1 menu intro (4s purple animation, non-root PGC — tests partial VOB loading + overlay timing)
 #   - Chapters sub-menu (VTS 1 menu) with 3 buttons: "Chapter 1", "Chapter 2", "Main Menu"
 #   - 4 titles across 3 titlesets
@@ -119,19 +122,40 @@ drawtext=${DT_BUG}:text='BUG if video does not start after menu button press':x=
 echo "=== Generating menu videos ==="
 
 # Root menu: dark gray background with button labels
-# Buttons: Title 1..4 + Title 1 Chapters (matching SPU highlight positions)
+# Buttons: Title 1..4 + Title 1 Chapters + Bonus (matching SPU highlight positions)
 $FFMPEG -y -loglevel error \
     -f lavfi -i "color=c=0x333333:s=720x480:r=29.97:d=3,\
-drawtext=${DT_HEADER}:text='ROOT MENU':x=(w-tw)/2:y=60,\
-drawtext=${DT_BTN}:text='Title 1':x=(w-tw)/2:y=140,\
-drawtext=${DT_BTN}:text='Title 2':x=(w-tw)/2:y=195,\
-drawtext=${DT_BTN}:text='Title 3':x=(w-tw)/2:y=250,\
-drawtext=${DT_BTN}:text='Title 4':x=(w-tw)/2:y=305,\
-drawtext=${DT_BTN}:text='Title 1 Chapters':x=(w-tw)/2:y=360" \
+drawtext=${DT_HEADER}:text='ROOT MENU':x=(w-tw)/2:y=40,\
+drawtext=${DT_BTN}:text='Title 1':x=(w-tw)/2:y=110,\
+drawtext=${DT_BTN}:text='Title 2':x=(w-tw)/2:y=160,\
+drawtext=${DT_BTN}:text='Title 3':x=(w-tw)/2:y=210,\
+drawtext=${DT_BTN}:text='Title 4':x=(w-tw)/2:y=260,\
+drawtext=${DT_BTN}:text='Title 1 Chapters':x=(w-tw)/2:y=310,\
+drawtext=${DT_BTN}:text='Bonus':x=(w-tw)/2:y=400" \
     -f lavfi -i "sine=frequency=330:duration=3" \
     -target ntsc-dvd \
     -c:a ac3 -b:a 192k \
     "$WORK_DIR/root_menu.mpg"
+
+# Bonus menu: reachable directly from root menu button 6 (no intro
+# between them). The direct menu→menu transition exposes the HIGHLIGHT
+# staleness issue: libdvdnav emits a HIGHLIGHT event between CELL_CHANGE
+# and the first NAV pack of the new cell, with PCI still holding the
+# outgoing menu's button count. The bonus menu has only 2 buttons, so
+# if PCI gets flushed prematurely, JS sees 6 buttons (or some wrong
+# count) and navigation breaks.
+$FFMPEG -y -loglevel error \
+    -f lavfi -i "color=c=0x264028:s=720x480:r=29.97:d=3,\
+drawtext=${DT_HEADER}:text='BONUS MENU':x=(w-tw)/2:y=60,\
+drawtext=${DT_INFO}:text='Direct from root menu (no intro) — 2 buttons':x=(w-tw)/2:y=100,\
+drawtext=${DT_BTN}:text='Play Title 1':x=(w-tw)/2:y=200,\
+drawtext=${DT_BTN}:text='Main Menu':x=(w-tw)/2:y=280,\
+drawtext=${DT_BUG}:text='BUG if menu shows 6 buttons (stale root PCI)':x=36:y=420,\
+drawtext=${DT_BUG}:text='BUG if navigation/activation fails in this menu':x=36:y=446" \
+    -f lavfi -i "sine=frequency=440:duration=3" \
+    -target ntsc-dvd \
+    -c:a ac3 -b:a 192k \
+    "$WORK_DIR/bonus_menu.mpg"
 
 # VTS 1 menu intro: purple background, plays before chapters sub-menu
 # Tests that partial VOB loading includes non-root menu PGCs (issue #14)
@@ -169,27 +193,37 @@ echo "=== Generating subpicture images ==="
 #   select=    Activated state — same as highlight
 # Generated with ffmpeg (no imagemagick dependency).
 
-# Root menu: 5 buttons stacked vertically
-# Button 1: "Title 1"          y=130..170
-# Button 2: "Title 2"          y=185..225
-# Button 3: "Title 3"          y=240..280
-# Button 4: "Title 4"          y=295..335
-# Button 5: "Title 1 Chapters" y=350..390
+# Root menu: 6 buttons stacked vertically
+# Button 1: "Title 1"          y=100..140
+# Button 2: "Title 2"          y=150..190
+# Button 3: "Title 3"          y=200..240
+# Button 4: "Title 4"          y=250..290
+# Button 5: "Title 1 Chapters" y=300..340
+# Button 6: "Bonus"            y=390..430
 
 # Normal state: gray filled rectangles at button positions (RGBA via geq filter)
-# geq is needed because drawbox doesn't preserve alpha on transparent canvas.
-# Button regions: 240-479 x {130-169, 185-224, 240-279, 295-334, 350-389}
-# Note: commas in between() must be escaped as \, inside ffmpeg filter expressions.
 $FFMPEG -y -loglevel error \
     -f lavfi -i "color=c=white:s=720x480:d=0.04,format=rgba" \
-    -vf "geq=r=128:g=128:b=128:a='if(between(X\,240\,479)*(between(Y\,130\,169)+between(Y\,185\,224)+between(Y\,240\,279)+between(Y\,295\,334)+between(Y\,350\,389))\,128\,0)'" \
+    -vf "geq=r=128:g=128:b=128:a='if(between(X\,240\,479)*(between(Y\,100\,139)+between(Y\,150\,189)+between(Y\,200\,239)+between(Y\,250\,289)+between(Y\,300\,339)+between(Y\,390\,429))\,128\,0)'" \
     -frames:v 1 "$WORK_DIR/root_image.png"
 
 # Highlight state: white filled rectangles (same regions, full alpha)
 $FFMPEG -y -loglevel error \
     -f lavfi -i "color=c=white:s=720x480:d=0.04,format=rgba" \
-    -vf "geq=r=255:g=255:b=255:a='if(between(X\,240\,479)*(between(Y\,130\,169)+between(Y\,185\,224)+between(Y\,240\,279)+between(Y\,295\,334)+between(Y\,350\,389))\,255\,0)'" \
+    -vf "geq=r=255:g=255:b=255:a='if(between(X\,240\,479)*(between(Y\,100\,139)+between(Y\,150\,189)+between(Y\,200\,239)+between(Y\,250\,289)+between(Y\,300\,339)+between(Y\,390\,429))\,255\,0)'" \
     -frames:v 1 "$WORK_DIR/root_highlight.png"
+
+# Bonus menu: 2 buttons
+# Button 1: "Play Title 1"  y=190..230
+# Button 2: "Main Menu"     y=270..310
+$FFMPEG -y -loglevel error \
+    -f lavfi -i "color=c=white:s=720x480:d=0.04,format=rgba" \
+    -vf "geq=r=128:g=128:b=128:a='if(between(X\,260\,459)*(between(Y\,190\,229)+between(Y\,270\,309))\,128\,0)'" \
+    -frames:v 1 "$WORK_DIR/bonus_image.png"
+$FFMPEG -y -loglevel error \
+    -f lavfi -i "color=c=white:s=720x480:d=0.04,format=rgba" \
+    -vf "geq=r=255:g=255:b=255:a='if(between(X\,260\,459)*(between(Y\,190\,229)+between(Y\,270\,309))\,255\,0)'" \
+    -frames:v 1 "$WORK_DIR/bonus_highlight.png"
 
 # Chapters sub-menu: 3 buttons
 # Button 1: "Chapter 1"  y=190..235
@@ -221,11 +255,28 @@ cat > "$WORK_DIR/root_spu.xml" <<XMLEOF
        highlight="$WORK_DIR/root_highlight.png"
        select="$WORK_DIR/root_highlight.png"
        force="yes" >
-    <button x0="240" y0="130" x1="480" y1="170" up="5" down="2" />
-    <button x0="240" y0="185" x1="480" y1="225" up="1" down="3" />
-    <button x0="240" y0="240" x1="480" y1="280" up="2" down="4" />
-    <button x0="240" y0="295" x1="480" y1="335" up="3" down="5" />
-    <button x0="240" y0="350" x1="480" y1="390" up="4" down="1" />
+    <button x0="240" y0="100" x1="480" y1="140" up="6" down="2" />
+    <button x0="240" y0="150" x1="480" y1="190" up="1" down="3" />
+    <button x0="240" y0="200" x1="480" y1="240" up="2" down="4" />
+    <button x0="240" y0="250" x1="480" y1="290" up="3" down="5" />
+    <button x0="240" y0="300" x1="480" y1="340" up="4" down="6" />
+    <button x0="240" y0="390" x1="480" y1="430" up="5" down="1" />
+  </spu>
+ </stream>
+</subpictures>
+XMLEOF
+
+# Bonus menu spumux config — 2 buttons
+cat > "$WORK_DIR/bonus_spu.xml" <<XMLEOF
+<subpictures>
+ <stream>
+  <spu start="00:00:00.00" end="00:00:03.00"
+       image="$WORK_DIR/bonus_image.png"
+       highlight="$WORK_DIR/bonus_highlight.png"
+       select="$WORK_DIR/bonus_highlight.png"
+       force="yes" >
+    <button x0="260" y0="190" x1="460" y1="230" up="2" down="2" />
+    <button x0="260" y0="270" x1="460" y1="310" up="1" down="1" />
   </spu>
  </stream>
 </subpictures>
@@ -250,6 +301,7 @@ XMLEOF
 
 export VIDEO_FORMAT=NTSC
 spumux -v 0 "$WORK_DIR/root_spu.xml" < "$WORK_DIR/root_menu.mpg" > "$WORK_DIR/root_menu_sub.mpg" 2>/dev/null
+spumux -v 0 "$WORK_DIR/bonus_spu.xml" < "$WORK_DIR/bonus_menu.mpg" > "$WORK_DIR/bonus_menu_sub.mpg" 2>/dev/null
 spumux -v 0 "$WORK_DIR/chapters_spu.xml" < "$WORK_DIR/chapters_menu.mpg" > "$WORK_DIR/chapters_menu_sub.mpg" 2>/dev/null
 
 echo "=== Building DVD structure ==="
@@ -257,7 +309,8 @@ rm -rf "$OUT_DIR"
 mkdir -p "$LIBRARY_ROOT"
 
 # DVD structure:
-#   VMGM: root menu with 5 buttons → Title 1, Title 2, Title 3, Title 4, Title 1 Chapters
+#   VMGM PGC 1: root menu (6 buttons) → Title 1..4, Title 1 Chapters, Bonus menu
+#   VMGM PGC 2: bonus menu (2 buttons) → Play Title 1, Main Menu
 #   VTS 1: Title 1 (blue, 8s, 2 chapters) + chapters sub-menu (3 buttons)
 #   VTS 2: Title 2 (green, 10s, 3 chapters) + Title 3 (yellow, 4s, 1 chapter)
 #          (two PGCs in one titleset — Title 3 starts mid-VOB to test PGC bounds)
@@ -276,6 +329,18 @@ cat > "$WORK_DIR/dvdauthor.xml" <<XMLEOF
         <button>jump title 3;</button>
         <button>jump title 4;</button>
         <button>jump titleset 1 menu;</button>
+        <button>jump pgc 2;</button>
+      </pgc>
+      <pgc pause="inf">
+        <!-- Pre-command sets the initially-highlighted button. The
+             resulting HIGHLIGHT event fires AFTER CELL_CHANGE but
+             BEFORE the cell's first NAV pack — the exact ordering
+             that triggers the PCI-staleness bug on commercial discs
+             like The Neverending Story's Scene Selections. -->
+        <pre>button = 1024;</pre>
+        <vob file="$WORK_DIR/bonus_menu_sub.mpg" pause="inf" />
+        <button>jump title 1;</button>
+        <button>jump pgc 1;</button>
       </pgc>
     </menus>
   </vmgm>
@@ -328,7 +393,8 @@ echo "=== Done ==="
 echo "VIDEO_TS directory: $OUT_DIR/VIDEO_TS"
 echo ""
 echo "Disc layout:"
-echo "  Root Menu (VMGM): 5 buttons — Title 1, Title 2, Title 3, Title 4, Chapters"
+echo "  Root Menu (VMGM PGC 1): 6 buttons — Title 1..4, Chapters, Bonus"
+echo "  Bonus Menu (VMGM PGC 2): 2 buttons — Play Title 1, Main Menu (tests direct menu→menu transition, no intro)"
 echo "  VTS 1 Menu Intro: 4s purple animation (non-root PGC, tests partial loading + overlay timing)"
 echo "  Chapters Sub-Menu (VTS 1 menu): 3 buttons — Chapter 1, Chapter 2, Main Menu"
 echo "  Title 1 (VTS 1): 8s, blue test pattern, 2 chapters (440Hz tone)"
