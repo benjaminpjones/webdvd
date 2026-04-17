@@ -542,21 +542,26 @@ const char* dvd_get_next_event(void) {
         }
 
         case DVDNAV_HIGHLIGHT: {
+            /* If a menu CELL_CHANGE is still pending (waiting for PCI
+             * to be primed by the new cell's first NAV pack), swallow
+             * this HIGHLIGHT. dvdnav emits an initial HIGHLIGHT on menu
+             * entry that refers to the incoming PCI by button number —
+             * but because the PCI hasn't been updated yet, the rectangle
+             * coords are garbage. Once the CELL_CHANGE is eventually
+             * emitted (on the first NAV pack with buttons), JS reads
+             * the current button via getCurrentButton() anyway. */
+            if (pending_menu_cell) {
+                continue;
+            }
             dvdnav_highlight_event_t *hl =
                 (dvdnav_highlight_event_t*)event_buf;
-            char hl_json[256];
-            snprintf(hl_json, sizeof(hl_json),
+            snprintf(json_buf, sizeof(json_buf),
                 "{\"event\":9,\"display\":%d,\"buttonN\":%u,"
                 "\"palette\":%u,\"sx\":%u,\"sy\":%u,\"ex\":%u,\"ey\":%u}",
                 hl->display, (unsigned)hl->buttonN,
                 (unsigned)hl->palette,
                 (unsigned)hl->sx, (unsigned)hl->sy,
                 (unsigned)hl->ex, (unsigned)hl->ey);
-            if (pending_menu_cell) {
-                emit_pending_and_defer(hl_json);
-                return json_buf;
-            }
-            memcpy(json_buf, hl_json, strlen(hl_json) + 1);
             return json_buf;
         }
 
