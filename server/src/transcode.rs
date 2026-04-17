@@ -64,48 +64,7 @@ pub async fn transcode_to_stream(
         disc.has_dvdread(),
     );
 
-    let mut args: Vec<String> = Vec::new();
-
-    // Input seeking (-ss before -i for fast seek)
-    if let Some(ss) = opts.start_secs {
-        args.extend(["-ss".to_string(), format!("{ss:.3}")]);
-    }
-
-    if use_stdin {
-        // Read from stdin (we'll pipe VOB data)
-        args.extend([
-            "-y".to_string(),
-            "-f".to_string(), "mpeg".to_string(),
-            "-i".to_string(), "pipe:0".to_string(),
-        ]);
-    } else {
-        args.extend([
-            "-y".to_string(),
-            "-f".to_string(), "concat".to_string(),
-            "-safe".to_string(), "0".to_string(),
-            "-i".to_string(),
-        ]);
-        args.push(concat_file.path().to_string_lossy().to_string());
-    }
-
-    // Duration limit
-    if let Some(t) = opts.duration_secs {
-        args.extend(["-t".to_string(), format!("{t:.3}")]);
-    }
-
-    args.extend(["-c:v".to_string(), "libx264".to_string()]);
-    args.extend(["-vf".to_string(), "yadif".to_string()]);
-
-    args.extend([
-        "-preset".to_string(), "fast".to_string(),
-        "-crf".to_string(), "23".to_string(),
-        "-c:a".to_string(), "aac".to_string(),
-        "-b:a".to_string(), "192k".to_string(),
-        "-ac".to_string(), "2".to_string(),
-        "-movflags".to_string(), "+frag_keyframe+empty_moov".to_string(),
-        "-f".to_string(), "mp4".to_string(),
-        "pipe:1".to_string(),
-    ]);
+    let args = build_ffmpeg_args(opts, use_stdin, concat_file.path());
 
     let stdin_mode = if use_stdin { Stdio::piped() } else { Stdio::null() };
     let mut child = Command::new("ffmpeg")
@@ -156,6 +115,72 @@ pub async fn transcode_to_stream(
 
     let stream = ReaderStream::new(stdout);
     Ok(axum::body::Body::from_stream(stream))
+}
+
+/// Build the ffmpeg argument vector for a transcode call.
+///
+/// Split out so unit tests can verify the critical flags — particularly
+/// that audio stream 0x80 (primary language per DVD convention) is
+/// explicitly mapped, preventing ffmpeg's default stream picker from
+/// selecting whichever audio appears first in the pipe bytes.
+fn build_ffmpeg_args(
+    opts: &TranscodeOpts,
+    use_stdin: bool,
+    concat_path: &Path,
+) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+
+    // Input seeking (-ss before -i for fast seek)
+    if let Some(ss) = opts.start_secs {
+        args.extend(["-ss".to_string(), format!("{ss:.3}")]);
+    }
+
+    if use_stdin {
+        args.extend([
+            "-y".to_string(),
+            "-f".to_string(), "mpeg".to_string(),
+            "-i".to_string(), "pipe:0".to_string(),
+        ]);
+    } else {
+        args.extend([
+            "-y".to_string(),
+            "-f".to_string(), "concat".to_string(),
+            "-safe".to_string(), "0".to_string(),
+            "-i".to_string(),
+        ]);
+        args.push(concat_path.to_string_lossy().to_string());
+    }
+
+    if let Some(t) = opts.duration_secs {
+        args.extend(["-t".to_string(), format!("{t:.3}")]);
+    }
+
+    // Explicit stream mapping: pick the first video stream and audio
+    // substream 0x80 (AC3 track 1 per DVD convention — typically the
+    // primary language). Without this, ffmpeg's default stream selection
+    // picks whichever audio appears first in the pipe bytes, which for
+    // mid-VOB starts (sector-seeked title playback) can be a secondary
+    // language track (e.g. French instead of English).
+    // The `?` suffix makes the audio map optional — discs without an
+    // AC3 track at 0x80 produce video-only output rather than failing.
+    args.extend(["-map".to_string(), "0:v:0".to_string()]);
+    args.extend(["-map".to_string(), "i:0x80?".to_string()]);
+
+    args.extend(["-c:v".to_string(), "libx264".to_string()]);
+    args.extend(["-vf".to_string(), "yadif".to_string()]);
+
+    args.extend([
+        "-preset".to_string(), "fast".to_string(),
+        "-crf".to_string(), "23".to_string(),
+        "-c:a".to_string(), "aac".to_string(),
+        "-b:a".to_string(), "192k".to_string(),
+        "-ac".to_string(), "2".to_string(),
+        "-movflags".to_string(), "+frag_keyframe+empty_moov".to_string(),
+        "-f".to_string(), "mp4".to_string(),
+        "pipe:1".to_string(),
+    ]);
+
+    args
 }
 
 /// Parse a NAV pack sector to extract DSI fields needed for ILVU navigation.
@@ -442,6 +467,33 @@ async fn pipe_raw_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: mid-VOB seeks (e.g. sector-seeked title playback) can
+    /// see French audio packets before English in the pipe. Without explicit
+    /// mapping, ffmpeg's default stream picker would select French. The
+    /// ffmpeg args must explicitly map stream id 0x80 to pin English.
+    #[test]
+    fn ffmpeg_args_pin_audio_to_stream_0x80() {
+        let opts = TranscodeOpts::default();
+        let args = build_ffmpeg_args(&opts, /* use_stdin */ true, Path::new("/tmp/concat.txt"));
+
+        // Walk the args and find every -map value
+        let maps: Vec<&str> = args
+            .windows(2)
+            .filter(|w| w[0] == "-map")
+            .map(|w| w[1].as_str())
+            .collect();
+
+        assert!(
+            maps.contains(&"i:0x80?"),
+            "audio must be pinned to stream id 0x80 to ensure primary \
+             language track plays regardless of pipe byte order; got maps: {maps:?}"
+        );
+        assert!(
+            maps.contains(&"0:v:0"),
+            "video stream must be explicitly mapped; got maps: {maps:?}"
+        );
+    }
 
     /// Build a synthetic 2048-byte NAV pack sector with the given DSI fields.
     fn make_nav_sector(vobu_ea: u32, vob_id: u16, category: u16, ilvu_ea: u32) -> Vec<u8> {

@@ -329,10 +329,11 @@ export class SessionManager {
     this.video.removeAttribute("src");
 
     // Reset VM and drive First Play to initialize the disc structure.
-    // This will error on title VOBs, but the VM is now initialized.
+    // acceptTitles=false so we don't accept a title cell as a playback
+    // target here — we're looking for a menu, not a title.
     this.session.reset();
     this.setState("loading");
-    await this.driveVM();
+    await this.driveVM(/* acceptTitles */ false);
 
     if (this._state === "menu") {
       this.loadMenuVideo();
@@ -341,20 +342,21 @@ export class SessionManager {
 
     // VM is now initialized (has processed VMGM). Try menuCall —
     // this should work now even though the last block read errored.
+    // acceptTitles=false: if the menu PGC auto-advances to a title
+    // (some discs' menus post-jump to the main movie instead of
+    // pausing for input), we must not treat that title as the user's
+    // requested playback target. They pressed Menu, not Play.
     this.log("Trying menuCall after VM init...");
     if (this.session.menuCall(3) || this.session.menuCall(2)) {
-      const target = await this.driveVM();
+      await this.driveVM(/* acceptTitles */ false);
       if (this.inState("menu")) {
         this.loadMenuVideo();
         return;
       }
-      if (target) {
-        this.playTarget(target);
-        return;
-      }
     }
 
-    this.log("Could not navigate to menu");
+    this.log("Could not navigate to menu — this disc may not have one");
+    this.setState("stopped");
   }
 
   private _hoverFailCount = 0;
@@ -654,25 +656,21 @@ export class SessionManager {
               }
             }
 
-            // After HOP_CHANNEL, PCI is stale until NAV_PACKETs from the
-            // new PGC are read. The first CELL_CHANGE fires before any
-            // NAV_PACKET, so skip it. By the second CELL_CHANGE, the C loop
-            // has read blocks (including NAV_PACKETs) from the first cell.
-            if (menuCellsSinceHop < 2 || awaitingTransition) {
-              this.log(
-                `Menu cell skip (cellsSinceHop=${menuCellsSinceHop}, awaitingTransition=${awaitingTransition})`,
-              );
-              // PCI is stale so we can't check buttons. Tentatively mark as
-              // intro — if the next cell (with fresh PCI) has buttons, this
-              // was indeed an intro cell. If not, it gets superseded.
+            // After button activation, the VM can emit stale CELL_CHANGE
+            // events from the outgoing menu before the jump completes.
+            // Skip these until HOP_CHANNEL or VTS_CHANGE clears the flag.
+            if (awaitingTransition) {
+              this.log(`Menu cell skip (awaitingTransition)`);
               continue;
             }
 
+            // PCI button data is guaranteed fresh here: glue.c defers a
+            // menu-domain CELL_CHANGE until the cell's first NAV pack has
+            // been processed. If buttons are populated, this cell is an
+            // interactive menu. If empty, it's an intro/non-interactive
+            // cell and we wait for a subsequent event with buttons.
             const buttons = this.session.getButtons();
             if (buttons.length > 0) {
-              // If buttons appear on the first cell after the hop guard,
-              // the hop-guarded cell(s) were likely the interactive menu
-              // itself (PCI was just stale). Don't treat them as intro.
               let currentButton = this.session.getCurrentButton();
               // Clamp stale highlight to valid range
               if (currentButton < 1 || currentButton > buttons.length) {

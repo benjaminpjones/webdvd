@@ -361,17 +361,21 @@ describe("SessionManager", () => {
   });
 
   describe("driveVM edge cases", () => {
-    test("post-activation skips stale cells until HOP + 2 cell changes", async () => {
+    test("post-activation skips stale cells until HOP clears the transition", async () => {
+      // Right after a button activation, the outgoing menu's VM can still
+      // emit a CELL_CHANGE for its own cell before the jump completes —
+      // that stale event must be skipped. Once HOP_CHANNEL arrives (or
+      // VTS_CHANGE), the transition is resolved and the next menu cell
+      // is accepted. PCI freshness is guaranteed by glue.c, which defers
+      // menu CELL_CHANGE until the new cell's first NAV pack is read.
       const session = createMockSession([
         // start() → menu
         evt.vtsChange(1),
         evt.cellMenu(10, 50),
-        // handlePostActivation (postActivation=true):
-        // awaitingTransition=true, menuCellsSinceHop=0
+        // handlePostActivation: awaitingTransition=true
         evt.cellMenu(10, 50), // skipped: awaitingTransition=true
-        evt.hop(), // clears awaitingTransition, resets menuCellsSinceHop=0
-        evt.cellMenu(20, 60), // menuCellsSinceHop=1, < 2 → skipped
-        evt.cellMenu(20, 60), // menuCellsSinceHop=2, ≥ 2 → menu detected
+        evt.hop(), // clears awaitingTransition
+        evt.cellMenu(20, 60), // fresh menu cell with buttons → detected
       ]);
       session.getButtons.mockReturnValue(BUTTONS);
       session.buttonActivate.mockReturnValue(true);
@@ -384,7 +388,6 @@ describe("SessionManager", () => {
 
       await sm.menuActivate();
 
-      // Should end up in menu again (navigated to new menu)
       expect(sm.state).toBe("menu");
     });
 
@@ -499,6 +502,40 @@ describe("SessionManager", () => {
       await video.onended!();
 
       expect(session.stillSkip).toHaveBeenCalled();
+      expect(sm.state).toBe("stopped");
+    });
+  });
+
+  describe("returnToMenu()", () => {
+    test("does not play title when disc's menu PGC auto-advances to a title", async () => {
+      // Reproduces The Neverending Story DVD: menuCall succeeds but the
+      // VTSM menu PGC immediately post-commands into title 1. We must
+      // NOT start playing that title — the user pressed Menu, not Play.
+      const session = createMockSession([
+        // First driveVM after reset (acceptTitles=false): hits a title
+        // cell which is skipped, then VM errors on title VOBs.
+        evt.vtsChange(1),
+        evt.cellTitle(1, 1, 4208),
+        evt.vmError("Error reading NAV packet."),
+        // After menuCall(3), the menu PGC is executed but jumps to a
+        // title cell immediately. acceptTitles=false must skip it
+        // rather than returning it as a playback target.
+        evt.hop(),
+        evt.vtsChange(1),
+        evt.cellMenu(0, 49), // menu cell skipped by cellsSinceHop<2
+        evt.vtsChange(1),
+        evt.cellTitle(1, 1, 4208), // must be skipped (acceptTitles=false)
+        evt.vmError("Error reading NAV packet."),
+      ]);
+      session.menuCall.mockImplementation((id: number) => id === 3);
+      const video = createMockVideo();
+      const sm = createManager(session, video);
+
+      await sm.returnToMenu();
+
+      // Video must not have been set to a title URL. Clicking Menu on a
+      // disc without an interactive menu should stop, not start the movie.
+      expect(video.src).toBe("");
       expect(sm.state).toBe("stopped");
     });
   });

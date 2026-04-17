@@ -25,8 +25,12 @@ static dvdnav_t *nav = NULL;
 static char dvd_path[256] = {0};  /* stash disc path for IFO reads */
 
 /* Pending menu cell info — when CELL_CHANGE fires in menu domain,
- * we stash it and continue looping to find the NAV_PACKET with buttons
- * (PCI isn't populated until a NAV pack is read). */
+ * we stash it and continue looping to find the NAV_PACKET that primes
+ * PCI (button data). Emitting the stashed CELL_CHANGE only once PCI is
+ * fresh lets JS see populated buttons on the very first event for a
+ * new menu, which is essential for single-cell menu PGCs (e.g. the
+ * Neverending Story root menu) where there's no second CELL_CHANGE to
+ * fall back on. */
 static int pending_menu_cell = 0;
 static int pending_cell_n = 0;
 static int pending_pg_n = 0;
@@ -34,6 +38,32 @@ static int pending_title = 0;
 static int pending_part = 0;
 static long long pending_pgc_length_ms = 0;
 static long long pending_cell_start_ms = 0;
+static uint32_t pending_first_sector = 0;
+static uint32_t pending_last_sector = 0;
+static uint32_t pending_pgc_last_sector = 0;
+
+/* Deferred event slot — holds a second JSON event to emit on the next
+ * dvd_get_next_event() call. Used when a terminal event (STILL_FRAME,
+ * VTS_CHANGE, HOP, ...) fires while a menu CELL_CHANGE is still pending:
+ * we must emit the CELL_CHANGE so JS sees the menu, but we can't lose
+ * the terminal event either — so we queue it here. */
+static char deferred_event_buf[2048];
+static int have_deferred_event = 0;
+
+static void format_pending_menu_cell(char *out, size_t out_size) {
+    snprintf(out, out_size,
+        "{\"event\":6,\"cellN\":%d,\"pgN\":%d,"
+        "\"pgcLengthMs\":%lld,\"cellStartSectors\":%lld,"
+        "\"firstSector\":%u,\"lastSector\":%u,"
+        "\"pgcLastSector\":%u,"
+        "\"title\":%d,\"part\":%d,\"isVts\":0}",
+        pending_cell_n, pending_pg_n,
+        pending_pgc_length_ms, pending_cell_start_ms,
+        (unsigned)pending_first_sector,
+        (unsigned)pending_last_sector,
+        (unsigned)pending_pgc_last_sector,
+        pending_title, pending_part);
+}
 
 /* Last NAV packet's VOBU start PTS (90kHz clock, VOB-absolute).
  * Used by JS to compute seek time into the menu VOB. */
@@ -63,6 +93,8 @@ int dvd_open(const char *path) {
 EMSCRIPTEN_KEEPALIVE
 void dvd_close(void) {
     if (nav) { dvdnav_close(nav); nav = NULL; }
+    pending_menu_cell = 0;
+    have_deferred_event = 0;
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -251,9 +283,42 @@ static char event_buf[2048];  /* for dvdnav_get_next_block */
 
 static char json_buf[16384];
 
+/* Flush any pending/deferred event into json_buf. Returns 1 if an event
+ * was emitted (caller should return json_buf), 0 otherwise. */
+static int flush_deferred_event(void) {
+    if (have_deferred_event) {
+        have_deferred_event = 0;
+        /* Copy to json_buf so callers always see the same buffer. */
+        size_t n = strlen(deferred_event_buf);
+        if (n >= sizeof(json_buf)) n = sizeof(json_buf) - 1;
+        memcpy(json_buf, deferred_event_buf, n);
+        json_buf[n] = '\0';
+        return 1;
+    }
+    return 0;
+}
+
+/* Queue a terminal event while a menu CELL_CHANGE is pending.
+ * Emits the pending CELL_CHANGE now (into json_buf) and defers the
+ * terminal event for the next call. The caller must return json_buf. */
+static void emit_pending_and_defer(const char *terminal_json) {
+    format_pending_menu_cell(json_buf, sizeof(json_buf));
+    pending_menu_cell = 0;
+    size_t n = strlen(terminal_json);
+    if (n >= sizeof(deferred_event_buf)) n = sizeof(deferred_event_buf) - 1;
+    memcpy(deferred_event_buf, terminal_json, n);
+    deferred_event_buf[n] = '\0';
+    have_deferred_event = 1;
+}
+
 EMSCRIPTEN_KEEPALIVE
 const char* dvd_get_next_event(void) {
     if (!nav) return "{\"event\":-1,\"error\":\"not open\"}";
+
+    /* Drain any event queued from the previous call. */
+    if (flush_deferred_event()) {
+        return json_buf;
+    }
 
     int32_t event = 0;
     int32_t len = 0;
@@ -273,6 +338,7 @@ const char* dvd_get_next_event(void) {
 
         if (status != DVDNAV_STATUS_OK) {
             pending_menu_cell = 0;
+            have_deferred_event = 0;
             snprintf(json_buf, sizeof(json_buf),
                 "{\"event\":-1,\"error\":\"%s\"}", dvdnav_err_to_string(nav));
             return json_buf;
@@ -286,12 +352,23 @@ const char* dvd_get_next_event(void) {
 
         case DVDNAV_NAV_PACKET: {
             /* NAV packs populate PCI (button data for menus) as a
-             * side effect of dvdnav_get_next_block(). We skip the event
-             * itself — menu detection happens via STILL_FRAME/HIGHLIGHT
-             * which fire after PCI is populated. */
+             * side effect of dvdnav_get_next_block(). */
             pci_t *nav_pci = dvdnav_get_current_nav_pci(nav);
             if (nav_pci) {
                 last_vobu_start_ptm = nav_pci->pci_gi.vobu_s_ptm;
+            }
+            /* If a menu CELL_CHANGE is deferred, emit it as soon as we
+             * find a NAV pack whose PCI has buttons. Not every menu cell
+             * has buttons at the first VOBU — the Matrix root menu, for
+             * example, has a short pre-roll before buttons appear ~17
+             * VOBUs in. Without waiting for buttons, JS sees CELL_CHANGE
+             * with empty PCI and treats the cell as intro-only. If the
+             * cell genuinely has no buttons (true intro), the next event
+             * handler flushes the pending cell without them. */
+            if (pending_menu_cell && nav_pci && nav_pci->hli.hl_gi.btn_ns > 0) {
+                format_pending_menu_cell(json_buf, sizeof(json_buf));
+                pending_menu_cell = 0;
+                return json_buf;
             }
             continue;
         }
@@ -320,7 +397,46 @@ const char* dvd_get_next_event(void) {
                 pgc_last_sector = state->pgc->cell_playback[state->pgc->nr_of_cells - 1].last_sector;
             }
 
-            snprintf(json_buf, sizeof(json_buf),
+            /* Menu cell: defer emission until PCI has buttons (see
+             * NAV_PACKET handler). If a previous menu cell is still
+             * pending (buttons never appeared — e.g. a pre-roll/intro
+             * cell), emit it as-is and stash this new cell for deferral
+             * on the next call. */
+            if (!is_vts) {
+                if (pending_menu_cell) {
+                    /* Emit old pending (no buttons) now; overwrite
+                     * pending with the new cell for the next call. */
+                    format_pending_menu_cell(json_buf, sizeof(json_buf));
+                    pending_cell_n = cell->cellN;
+                    pending_pg_n = cell->pgN;
+                    pending_title = title;
+                    pending_part = part;
+                    pending_pgc_length_ms = cell->pgc_length / 90;
+                    pending_cell_start_ms = cell->cell_start;
+                    pending_first_sector = first_sector;
+                    pending_last_sector = last_sector;
+                    pending_pgc_last_sector = pgc_last_sector;
+                    /* pending_menu_cell stays 1 */
+                    return json_buf;
+                }
+                pending_menu_cell = 1;
+                pending_cell_n = cell->cellN;
+                pending_pg_n = cell->pgN;
+                pending_title = title;
+                pending_part = part;
+                pending_pgc_length_ms = cell->pgc_length / 90;
+                pending_cell_start_ms = cell->cell_start;
+                pending_first_sector = first_sector;
+                pending_last_sector = last_sector;
+                pending_pgc_last_sector = pgc_last_sector;
+                continue;
+            }
+
+            /* Title cell. If a menu CELL_CHANGE was pending (menu→title
+             * transition without buttons — or before buttons appeared),
+             * emit the menu cell first and defer the title cell. */
+            char title_json[512];
+            snprintf(title_json, sizeof(title_json),
                 "{\"event\":6,\"cellN\":%d,\"pgN\":%d,"
                 "\"pgcLengthMs\":%lld,\"cellStartSectors\":%lld,"
                 "\"firstSector\":%u,\"lastSector\":%u,"
@@ -332,25 +448,42 @@ const char* dvd_get_next_event(void) {
                 (unsigned)first_sector, (unsigned)last_sector,
                 (unsigned)pgc_last_sector,
                 (int)title, (int)part, is_vts);
+            if (pending_menu_cell) {
+                emit_pending_and_defer(title_json);
+                return json_buf;
+            }
+            memcpy(json_buf, title_json, strlen(title_json) + 1);
             return json_buf;
         }
 
         case DVDNAV_VTS_CHANGE: {
             dvdnav_vts_change_event_t *vts =
                 (dvdnav_vts_change_event_t*)event_buf;
-            snprintf(json_buf, sizeof(json_buf),
+            char vts_json[256];
+            snprintf(vts_json, sizeof(vts_json),
                 "{\"event\":5,\"oldVtsN\":%d,\"newVtsN\":%d,"
                 "\"oldDomain\":%d,\"newDomain\":%d}",
                 vts->old_vtsN, vts->new_vtsN,
                 (int)vts->old_domain, (int)vts->new_domain);
+            if (pending_menu_cell) {
+                emit_pending_and_defer(vts_json);
+                return json_buf;
+            }
+            memcpy(json_buf, vts_json, strlen(vts_json) + 1);
             return json_buf;
         }
 
         case DVDNAV_STILL_FRAME: {
             dvdnav_still_event_t *still =
                 (dvdnav_still_event_t*)event_buf;
-            snprintf(json_buf, sizeof(json_buf),
+            char still_json[64];
+            snprintf(still_json, sizeof(still_json),
                 "{\"event\":2,\"stillLength\":%d}", still->length);
+            if (pending_menu_cell) {
+                emit_pending_and_defer(still_json);
+                return json_buf;
+            }
+            memcpy(json_buf, still_json, strlen(still_json) + 1);
             return json_buf;
         }
 
@@ -360,9 +493,17 @@ const char* dvd_get_next_event(void) {
             continue;
 
         case DVDNAV_STOP:
+            if (pending_menu_cell) {
+                emit_pending_and_defer("{\"event\":8}");
+                return json_buf;
+            }
             return "{\"event\":8}";
 
         case DVDNAV_HOP_CHANNEL:
+            if (pending_menu_cell) {
+                emit_pending_and_defer("{\"event\":12}");
+                return json_buf;
+            }
             return "{\"event\":12}";
 
         case DVDNAV_SPU_STREAM_CHANGE: {
@@ -403,13 +544,19 @@ const char* dvd_get_next_event(void) {
         case DVDNAV_HIGHLIGHT: {
             dvdnav_highlight_event_t *hl =
                 (dvdnav_highlight_event_t*)event_buf;
-            snprintf(json_buf, sizeof(json_buf),
+            char hl_json[256];
+            snprintf(hl_json, sizeof(hl_json),
                 "{\"event\":9,\"display\":%d,\"buttonN\":%u,"
                 "\"palette\":%u,\"sx\":%u,\"sy\":%u,\"ex\":%u,\"ey\":%u}",
                 hl->display, (unsigned)hl->buttonN,
                 (unsigned)hl->palette,
                 (unsigned)hl->sx, (unsigned)hl->sy,
                 (unsigned)hl->ex, (unsigned)hl->ey);
+            if (pending_menu_cell) {
+                emit_pending_and_defer(hl_json);
+                return json_buf;
+            }
+            memcpy(json_buf, hl_json, strlen(hl_json) + 1);
             return json_buf;
         }
 
@@ -420,8 +567,14 @@ const char* dvd_get_next_event(void) {
         }
     }
 
-    /* Safety valve — yielded after MAX_ITER or time limit without an interesting event */
-    pending_menu_cell = 0;
+    /* Safety valve — yielded after MAX_ITER or time limit. If a menu
+     * CELL_CHANGE is still pending (no NAV pack fired in time), emit
+     * it anyway — JS will see stale/empty PCI but at least the cell. */
+    if (pending_menu_cell) {
+        format_pending_menu_cell(json_buf, sizeof(json_buf));
+        pending_menu_cell = 0;
+        return json_buf;
+    }
     return "{\"event\":-2,\"error\":\"iteration limit\"}";
 }
 
