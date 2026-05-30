@@ -26,7 +26,10 @@ pub struct TranscodeOpts {
 /// streaming body. Playback can begin as soon as the first fragment arrives.
 ///
 /// When `disc.has_dvdread()` is true, VOB data is read through libdvdread
-/// for CSS decryption and piped to ffmpeg via stdin.
+/// and piped to ffmpeg via stdin. libdvdread reads the VOBs directly; if the
+/// disc is CSS-encrypted and libdvdcss is installed on the host, libdvdread
+/// uses it to decrypt transparently. Already-decrypted (ripped) VIDEO_TS data
+/// passes through unchanged with no decryption involved.
 pub async fn transcode_to_stream(
     vob_files: &[&Path],
     opts: &TranscodeOpts,
@@ -48,8 +51,9 @@ pub async fn transcode_to_stream(
     let concat_file = tempfile::NamedTempFile::new()?;
     std::fs::write(concat_file.path(), &concat_list)?;
 
-    // When dvdread is active, always pipe through stdin for CSS decryption.
-    // When sector is specified, also use stdin for sector-based seeking.
+    // When dvdread is active, always pipe through stdin so libdvdread reads the
+    // VOBs (and decrypts via libdvdcss if the disc is encrypted and the library
+    // is present). When sector is specified, also use stdin for sector-based seeking.
     let use_stdin = opts.sector.is_some() || disc.has_dvdread();
 
     tracing::info!(
@@ -187,7 +191,8 @@ fn parse_nav_pack(sector_data: &[u8]) -> Option<(u32, u16, bool, u32)> {
     Some((vobu_ea, vob_id, ilvu_flag, ilvu_ea))
 }
 
-/// Pipe VOB data through libdvdread (CSS-decrypted) to ffmpeg stdin.
+/// Pipe VOB data through libdvdread to ffmpeg stdin (decrypted via libdvdcss
+/// only if the disc is encrypted and that library is installed).
 ///
 /// Reads in chunks via a channel to avoid loading multi-GB title VOBs
 /// into memory at once. Handles interleaved (ILVU) cells by reading
@@ -226,7 +231,7 @@ async fn pipe_dvdread(
 
             let remaining = end_block - start_block;
             tracing::info!(
-                "Streaming {} blocks ({} MB) of decrypted VOB data to ffmpeg",
+                "Streaming {} blocks ({} MB) of VOB data to ffmpeg",
                 remaining,
                 remaining * 2048 / (1024 * 1024),
             );
