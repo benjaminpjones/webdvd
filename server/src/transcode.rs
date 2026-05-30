@@ -51,9 +51,8 @@ pub async fn transcode_to_stream(
     let concat_file = tempfile::NamedTempFile::new()?;
     std::fs::write(concat_file.path(), &concat_list)?;
 
-    // When dvdread is active, always pipe through stdin so libdvdread reads the
-    // VOBs (and decrypts via libdvdcss if the disc is encrypted and the library
-    // is present). When sector is specified, also use stdin for sector-based seeking.
+    // Pipe through stdin when dvdread is active (so libdvdread does the reading —
+    // see `transcode_to_stream` docs) or when sector-based seeking is requested.
     let use_stdin = opts.sector.is_some() || disc.has_dvdread();
 
     tracing::info!(
@@ -191,8 +190,8 @@ fn parse_nav_pack(sector_data: &[u8]) -> Option<(u32, u16, bool, u32)> {
     Some((vobu_ea, vob_id, ilvu_flag, ilvu_ea))
 }
 
-/// Pipe VOB data through libdvdread to ffmpeg stdin (decrypted via libdvdcss
-/// only if the disc is encrypted and that library is installed).
+/// Pipe VOB data from libdvdread to ffmpeg stdin. See `transcode_to_stream`
+/// for how libdvdread reads (and optionally decrypts) the VOBs.
 ///
 /// Reads in chunks via a channel to avoid loading multi-GB title VOBs
 /// into memory at once. Handles interleaved (ILVU) cells by reading
