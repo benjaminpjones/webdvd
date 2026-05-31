@@ -17,6 +17,8 @@ tempfile = "3"
 tokio-util = { version = "0.7", features = ["io"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 bytes = "1"
+sha2 = "0.10"
+hex = "0.4"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }

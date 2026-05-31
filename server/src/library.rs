@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::disc::Disc;
+use crate::disc::{Disc, Visibility};
 
 /// A collection of DVD discs found under a root directory.
 /// Expects: root/<title>/VIDEO_TS/
@@ -40,7 +40,9 @@ impl Library {
                 .to_string_lossy()
                 .to_string();
 
-            match Disc::open(&video_ts) {
+            let visibility = load_visibility(&path);
+
+            match Disc::open(&video_ts, visibility) {
                 Ok(disc) => {
                     discs.insert(slug, Arc::new(disc));
                 }
@@ -62,5 +64,62 @@ impl Library {
         }
 
         Ok(Self { discs })
+    }
+}
+
+/// Read `meta.json` from the disc directory (sibling to VIDEO_TS/) and
+/// extract the visibility flag. Missing file, parse error, or absent field
+/// all default to Private — opt-in for public exposure.
+fn load_visibility(disc_dir: &Path) -> Visibility {
+    let path = disc_dir.join("meta.json");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return Visibility::Private;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else {
+        tracing::warn!("Failed to parse {} — defaulting to private", path.display());
+        return Visibility::Private;
+    };
+    match v.get("visibility").and_then(|x| x.as_str()) {
+        Some("public") => Visibility::Public,
+        _ => Visibility::Private,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_meta_defaults_to_private() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_visibility(dir.path()), Visibility::Private);
+    }
+
+    #[test]
+    fn meta_with_public_returns_public() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("meta.json"), r#"{"visibility":"public"}"#).unwrap();
+        assert_eq!(load_visibility(dir.path()), Visibility::Public);
+    }
+
+    #[test]
+    fn meta_with_private_returns_private() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("meta.json"), r#"{"visibility":"private"}"#).unwrap();
+        assert_eq!(load_visibility(dir.path()), Visibility::Private);
+    }
+
+    #[test]
+    fn meta_missing_visibility_field_defaults_to_private() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("meta.json"), r#"{"other":"field"}"#).unwrap();
+        assert_eq!(load_visibility(dir.path()), Visibility::Private);
+    }
+
+    #[test]
+    fn unparsable_meta_defaults_to_private() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("meta.json"), "not json").unwrap();
+        assert_eq!(load_visibility(dir.path()), Visibility::Private);
     }
 }

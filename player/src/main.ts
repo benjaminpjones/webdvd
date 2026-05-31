@@ -7,6 +7,13 @@ import { MenuOverlay } from "./overlay";
 interface LibraryDisc {
   slug: string;
   title: string;
+  visibility: "public" | "private";
+}
+
+interface LibraryResponse {
+  discs: LibraryDisc[];
+  auth_enabled: boolean;
+  authenticated: boolean;
 }
 
 /* --- DOM refs --- */
@@ -14,9 +21,33 @@ const appEl = document.getElementById("app")!;
 
 /* --- Library view --- */
 
-function showLibrary(discs: LibraryDisc[]) {
+function showLibrary(data: LibraryResponse) {
   appEl.innerHTML = "";
   appEl.className = "library-view";
+
+  if (data.auth_enabled) {
+    const authBar = document.createElement("div");
+    authBar.className = "auth-bar";
+    if (data.authenticated) {
+      const btn = document.createElement("button");
+      btn.className = "auth-btn";
+      btn.textContent = "Sign out";
+      btn.addEventListener("click", () => {
+        void (async () => {
+          await fetch("/api/auth/logout", { method: "POST" });
+          void route();
+        })();
+      });
+      authBar.appendChild(btn);
+    } else {
+      const btn = document.createElement("button");
+      btn.className = "auth-btn";
+      btn.textContent = "Sign in";
+      btn.addEventListener("click", () => showLoginModal());
+      authBar.appendChild(btn);
+    }
+    appEl.appendChild(authBar);
+  }
 
   const heading = document.createElement("h1");
   heading.textContent = "webdvd";
@@ -27,7 +58,7 @@ function showLibrary(discs: LibraryDisc[]) {
   grid.className = "library-grid";
   appEl.appendChild(grid);
 
-  for (const disc of discs) {
+  for (const disc of data.discs) {
     const card = document.createElement("button");
     card.className = "disc-card";
     card.addEventListener("click", () => {
@@ -44,8 +75,62 @@ function showLibrary(discs: LibraryDisc[]) {
     title.textContent = disc.title;
     card.appendChild(title);
 
+    if (disc.visibility === "private") {
+      const lock = document.createElement("div");
+      lock.className = "disc-lock";
+      lock.textContent = "\uD83D\uDD13"; // unlocked padlock \u2014 only shown after sign-in
+      card.appendChild(lock);
+    }
+
     grid.appendChild(card);
   }
+}
+
+function showLoginModal() {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+
+  const modal = document.createElement("form");
+  modal.className = "modal";
+  modal.innerHTML = `
+    <h2>Sign in</h2>
+    <input type="password" name="password" placeholder="Password" autocomplete="current-password" required>
+    <div class="modal-error" hidden></div>
+    <div class="modal-buttons">
+      <button type="button" class="modal-cancel">Cancel</button>
+      <button type="submit" class="modal-submit">Sign in</button>
+    </div>
+  `;
+  overlay.appendChild(modal);
+
+  const close = () => overlay.remove();
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) close();
+  });
+  modal.querySelector(".modal-cancel")!.addEventListener("click", close);
+
+  const errEl = modal.querySelector(".modal-error") as HTMLElement;
+  modal.addEventListener("submit", (e) => {
+    e.preventDefault();
+    void (async () => {
+      const password = (modal.elements.namedItem("password") as HTMLInputElement).value;
+      const resp = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (resp.ok) {
+        close();
+        void route();
+      } else {
+        errEl.textContent = "Invalid password";
+        errEl.hidden = false;
+      }
+    })();
+  });
+
+  document.body.appendChild(overlay);
+  (modal.querySelector("input[type=password]") as HTMLInputElement).focus();
 }
 
 /* --- Player view --- */
@@ -325,8 +410,8 @@ async function route() {
       appEl.innerHTML = '<div class="loading">Loading library...</div>';
       const resp = await fetch("/api/library");
       if (!resp.ok) throw new Error(`Failed to fetch library: ${resp.statusText}`);
-      const data = (await resp.json()) as { discs: LibraryDisc[] };
-      showLibrary(data.discs);
+      const data = (await resp.json()) as LibraryResponse;
+      showLibrary(data);
     } catch (err) {
       console.error("[init] Failed:", err);
       appEl.innerHTML = `<div class="loading">Error: ${String(err)}</div>`;

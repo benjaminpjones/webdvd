@@ -389,6 +389,12 @@ XMLEOF
 
 dvdauthor -x "$WORK_DIR/dvdauthor.xml"
 
+# Mark the test disc as public so it's reachable even when PLAYER_PASSWORD
+# is set on the server. Personal discs default to private without meta.json.
+cat > "$OUT_DIR/meta.json" << 'METAEOF'
+{"visibility": "public"}
+METAEOF
+
 echo "=== Done ==="
 echo "VIDEO_TS directory: $OUT_DIR/VIDEO_TS"
 echo ""

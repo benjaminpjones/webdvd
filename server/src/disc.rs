@@ -5,9 +5,18 @@ use std::sync::Mutex;
 #[cfg(has_dvdread)]
 use crate::dvdread::{self, DvdReader};
 
+/// Whether a disc is reachable without authentication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Visibility {
+    Public,
+    Private,
+}
+
 /// Represents a VIDEO_TS directory on disk.
 pub struct Disc {
     pub path: PathBuf,
+    pub visibility: Visibility,
     vts_ifos: Vec<PathBuf>,
     vobs: Vec<PathBuf>,
     #[cfg(has_dvdread)]
@@ -15,7 +24,7 @@ pub struct Disc {
 }
 
 impl Disc {
-    pub fn open(video_ts: &Path) -> anyhow::Result<Self> {
+    pub fn open(video_ts: &Path, visibility: Visibility) -> anyhow::Result<Self> {
         if !video_ts.is_dir() {
             anyhow::bail!("{} is not a directory", video_ts.display());
         }
@@ -65,6 +74,7 @@ impl Disc {
 
         Ok(Self {
             path: video_ts.to_path_buf(),
+            visibility,
             vts_ifos,
             vobs,
             #[cfg(has_dvdread)]

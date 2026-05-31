@@ -1,4 +1,5 @@
 mod api;
+mod auth;
 mod cache;
 mod disc;
 #[cfg(has_dvdread)]
@@ -29,6 +30,7 @@ struct Args {
 pub struct AppState {
     pub library: Arc<library::Library>,
     pub cache: Arc<cache::Cache>,
+    pub auth: Arc<auth::Auth>,
 }
 
 #[tokio::main]
@@ -59,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         library: Arc::new(lib),
         cache: Arc::new(cache::Cache::new(cache_dir)),
+        auth: Arc::new(auth::Auth::from_env()),
     };
 
     let app = api::router(state);

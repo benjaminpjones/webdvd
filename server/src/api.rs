@@ -3,17 +3,20 @@ use std::sync::Arc;
 use axum::{
     Router,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Json},
-    routing::get,
+    routing::{get, post},
 };
 use tower_http::cors::CorsLayer;
 
-use crate::{AppState, cache, disc::Disc, transcode};
+use crate::{AppState, auth, cache, disc::{Disc, Visibility}, transcode};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/library", get(library_list))
+        .route("/api/auth/login", post(login))
+        .route("/api/auth/logout", post(logout))
+        .route("/api/auth/me", get(auth_status))
         .route("/api/disc/{slug}/info", get(disc_info))
         .route("/api/disc/{slug}/transcode/{titleset}", get(transcode_titleset))
         .route("/api/disc/{slug}/ifo-list", get(ifo_list))
@@ -28,38 +31,110 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Helper to look up a disc by slug, returning 404 if not found.
-fn get_disc(state: &AppState, slug: &str) -> Result<Arc<Disc>, (StatusCode, String)> {
-    state
-        .library
-        .discs
-        .get(slug)
-        .cloned()
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Disc not found: {slug}")))
+fn cookie_header(headers: &HeaderMap) -> Option<&str> {
+    headers.get(header::COOKIE).and_then(|v| v.to_str().ok())
 }
 
-async fn library_list(State(state): State<AppState>) -> Json<serde_json::Value> {
+fn is_authed(state: &AppState, headers: &HeaderMap) -> bool {
+    state.auth.is_authed(cookie_header(headers))
+}
+
+/// Look up a disc and enforce visibility + auth: private discs require a
+/// valid session cookie. Returns 404 (not 401/403) for unauthorized access
+/// to private discs so an unauthenticated caller can't enumerate the
+/// existence of private slugs.
+fn require_access(
+    state: &AppState,
+    slug: &str,
+    headers: &HeaderMap,
+) -> Result<Arc<Disc>, (StatusCode, String)> {
+    let not_found = || (StatusCode::NOT_FOUND, format!("Disc not found: {slug}"));
+    let disc = state.library.discs.get(slug).cloned().ok_or_else(not_found)?;
+    if disc.visibility == Visibility::Private && !is_authed(state, headers) {
+        return Err(not_found());
+    }
+    Ok(disc)
+}
+
+async fn library_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Json<serde_json::Value> {
+    let show_all = is_authed(&state, &headers);
     let discs: Vec<serde_json::Value> = state
         .library
         .discs
         .iter()
+        .filter(|(_, disc)| show_all || disc.visibility == Visibility::Public)
         .map(|(slug, disc)| {
             serde_json::json!({
                 "slug": slug,
                 "title": slug,
                 "titlesets": disc.titlesets(),
                 "vob_count": disc.vob_count(),
+                "visibility": disc.visibility,
             })
         })
         .collect();
-    Json(serde_json::json!({ "discs": discs }))
+    Json(serde_json::json!({
+        "discs": discs,
+        "auth_enabled": state.auth.enabled(),
+        "authenticated": show_all,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct LoginRequest {
+    password: String,
+}
+
+async fn login(
+    State(state): State<AppState>,
+    Json(body): Json<LoginRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if !state.auth.check_password(&body.password) {
+        return Err((StatusCode::UNAUTHORIZED, "Invalid password".into()));
+    }
+    let Some(token) = state.auth.session_token() else {
+        // Auth disabled — nothing to set. Return success so the UI flows the same.
+        return Ok((HeaderMap::new(), Json(serde_json::json!({ "ok": true }))));
+    };
+    let cookie = format!(
+        "{}={token}; HttpOnly; Path=/; Max-Age={}; SameSite=Lax",
+        auth::COOKIE_NAME,
+        auth::COOKIE_MAX_AGE_SECS,
+    );
+    let mut hdrs = HeaderMap::new();
+    hdrs.insert(header::SET_COOKIE, cookie.parse().unwrap());
+    Ok((hdrs, Json(serde_json::json!({ "ok": true }))))
+}
+
+async fn logout() -> impl IntoResponse {
+    let cookie = format!(
+        "{}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax",
+        auth::COOKIE_NAME,
+    );
+    let mut hdrs = HeaderMap::new();
+    hdrs.insert(header::SET_COOKIE, cookie.parse().unwrap());
+    (hdrs, Json(serde_json::json!({ "ok": true })))
+}
+
+async fn auth_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "enabled": state.auth.enabled(),
+        "authenticated": is_authed(&state, &headers),
+    }))
 }
 
 async fn disc_info(
     State(state): State<AppState>,
     Path(slug): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let disc = get_disc(&state, &slug)?;
+    let disc = require_access(&state, &slug, &headers)?;
     Ok(Json(serde_json::json!({
         "path": disc.path.display().to_string(),
         "titlesets": disc.titlesets(),
@@ -70,16 +145,18 @@ async fn disc_info(
 async fn ifo_list(
     State(state): State<AppState>,
     Path(slug): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<String>>, (StatusCode, String)> {
-    let disc = get_disc(&state, &slug)?;
+    let disc = require_access(&state, &slug, &headers)?;
     Ok(Json(disc.ifo_files()))
 }
 
 async fn ifo_file(
     State(state): State<AppState>,
     Path((slug, filename)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let disc = get_disc(&state, &slug)?;
+    let disc = require_access(&state, &slug, &headers)?;
     disc.video_ts_file(&filename)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("File not found: {filename}")))?;
 
@@ -98,16 +175,18 @@ async fn ifo_file(
 async fn vob_list(
     State(state): State<AppState>,
     Path(slug): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<String>>, (StatusCode, String)> {
-    let disc = get_disc(&state, &slug)?;
+    let disc = require_access(&state, &slug, &headers)?;
     Ok(Json(disc.vob_files()))
 }
 
 async fn vob_file(
     State(state): State<AppState>,
     Path((slug, filename)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let disc = get_disc(&state, &slug)?;
+    let disc = require_access(&state, &slug, &headers)?;
     disc.vob_file(&filename)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("VOB not found: {filename}")))?;
 
@@ -133,8 +212,9 @@ async fn vob_range(
     State(state): State<AppState>,
     Path((slug, filename)): Path<(String, String)>,
     Query(params): Query<VobRangeParams>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let disc = get_disc(&state, &slug)?;
+    let disc = require_access(&state, &slug, &headers)?;
     disc.vob_file(&filename)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("VOB not found: {filename}")))?;
 
@@ -156,8 +236,9 @@ async fn vob_range(
 async fn vob_size(
     State(state): State<AppState>,
     Path((slug, filename)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let disc = get_disc(&state, &slug)?;
+    let disc = require_access(&state, &slug, &headers)?;
     disc.vob_file(&filename)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("VOB not found: {filename}")))?;
 
@@ -196,8 +277,9 @@ async fn transcode_menu(
     State(state): State<AppState>,
     Path((slug, titleset)): Path<(String, u32)>,
     Query(params): Query<TranscodeParams>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let disc = get_disc(&state, &slug)?;
+    let disc = require_access(&state, &slug, &headers)?;
     let key = cache_key(&slug, cache::Kind::Menu, titleset, &params);
 
     if let Some(body) = state.cache.serve_if_cached(&key).await {
@@ -235,8 +317,9 @@ async fn transcode_titleset(
     State(state): State<AppState>,
     Path((slug, titleset)): Path<(String, u32)>,
     Query(params): Query<TranscodeParams>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let disc = get_disc(&state, &slug)?;
+    let disc = require_access(&state, &slug, &headers)?;
     let key = cache_key(&slug, cache::Kind::Title, titleset, &params);
 
     if let Some(body) = state.cache.serve_if_cached(&key).await {
