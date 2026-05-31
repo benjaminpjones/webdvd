@@ -237,25 +237,13 @@ function setupOverlayMouse(
   overlay.addEventListener("click", (e) => {
     if (sm.state !== "menu") return;
     const pt = menuOverlay.screenToDvd(e.clientX, e.clientY);
-    console.log(
-      `[mouse] click screen=(${e.clientX},${e.clientY}) dvd=${pt ? `(${pt.x},${pt.y})` : "null"}`,
-    );
     if (pt) void sm.menuClick(pt.x, pt.y);
   });
 
-  let hoverLog = 0;
   overlay.addEventListener("mousemove", (e) => {
     if (sm.state !== "menu") return;
     const pt = menuOverlay.screenToDvd(e.clientX, e.clientY);
-    if (pt) {
-      if (hoverLog++ % 30 === 0) {
-        const rect = overlay.getBoundingClientRect();
-        console.log(
-          `[mouse] hover screen=(${e.clientX},${e.clientY}) dvd=(${pt.x},${pt.y}) overlay=${Math.round(rect.width)}x${Math.round(rect.height)} buttons: ${sm.menuState?.buttons.map((b) => `#${b.buttonN}:(${b.x0},${b.y0})-(${b.x1},${b.y1})`).join(" ")}`,
-        );
-      }
-      sm.menuHover(pt.x, pt.y);
-    }
+    if (pt) sm.menuHover(pt.x, pt.y);
   });
 }
 
@@ -271,7 +259,6 @@ async function openDisc(slug: string) {
     const session = await initSession(slug);
     const structure = session.getDiscStructure();
 
-    console.log("[dvdnav] Disc structure:", structure);
     displayDiscStructure(discStructureEl, structure);
     discInfoEl.textContent = `${structure.titleString || slug} — ${structure.titles.length} title(s)`;
 

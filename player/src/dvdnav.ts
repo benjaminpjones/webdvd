@@ -347,7 +347,6 @@ async function loadDiscFiles(mod: DvdnavModule, slug: string): Promise<LoadState
   const vmgmSet = new Set(vmgmVobs);
   if (!vmgmSet.has("VIDEO_TS.VOB")) {
     mod.FS.writeFile(`${vtsPath}/VIDEO_TS.VOB`, new Uint8Array(0));
-    console.log("[dvdnav] Created empty VIDEO_TS.VOB placeholder");
   }
   for (const ifo of ifoFiles) {
     const m = ifo.match(/^(VTS_\d+)_0\.IFO$/);
@@ -356,10 +355,6 @@ async function loadDiscFiles(mod: DvdnavModule, slug: string): Promise<LoadState
       mod.FS.writeFile(`${vtsPath}/${m[1]}_1.VOB`, new Uint8Array(0));
     }
   }
-
-  console.log(
-    `[dvdnav] Phase 1: loaded ${ifoFiles.length} IFO/BUP + ${vmgmVobs.length} VMGM VOB files`,
-  );
 
   // --- Phase 2 (blocking): VTS menu VOB loading with per-PGC partial fetch ---
   const vtsMenuPgcs = new Map<number, import("./ifo-parser").PgcCells[]>();
@@ -420,7 +415,6 @@ async function loadDiscFiles(mod: DvdnavModule, slug: string): Promise<LoadState
         if (menuBytes > 0 && menuBytes < totalSize * 0.75) {
           // Fetch cells for all menu PGCs (intro animations, root, submenus).
           // Sequential to avoid disc seek thrashing on physical drives.
-          let bytesLoaded = 0;
           for (const range of allCells) {
             const resp = await discFetch(
               `/vob-range/${vobName}?start=${range.firstSector}&end=${range.lastSector}`,
@@ -428,16 +422,10 @@ async function loadDiscFiles(mod: DvdnavModule, slug: string): Promise<LoadState
             if (!resp.ok) continue;
             const data = new Uint8Array(await resp.arrayBuffer());
             buf.set(data, range.firstSector * 2048);
-            bytesLoaded += data.byteLength;
           }
 
           mod.FS.writeFile(`${vtsPath}/${vobName}`, buf);
           loadedSectors.set(vtsN, [...allCells]);
-
-          const pct = ((bytesLoaded / totalSize) * 100).toFixed(1);
-          console.log(
-            `[dvdnav] Loaded ${vobName}: ${bytesLoaded} of ${totalSize} bytes (${pct}%, all menu PGCs)`,
-          );
         } else {
           // Root covers most of VOB — download full
           const resp = await discFetch(`/vob/${vobName}`);
@@ -449,7 +437,6 @@ async function loadDiscFiles(mod: DvdnavModule, slug: string): Promise<LoadState
           loadedSectors.set(vtsN, [
             { firstSector: 0, lastSector: totalSectors - 1, durationMs: 0 },
           ]);
-          console.log(`[dvdnav] Loaded ${vobName} (${data.byteLength} bytes)`);
         }
       } else {
         // Small VOB — download fully
@@ -463,7 +450,6 @@ async function loadDiscFiles(mod: DvdnavModule, slug: string): Promise<LoadState
           loadedSectors.set(vtsN, [
             { firstSector: 0, lastSector: totalSectors - 1, durationMs: 0 },
           ]);
-          console.log(`[dvdnav] Loaded ${vobName} (${data.byteLength} bytes)`);
         }
         // Parse IFO for on-demand metadata
         const ifoResp = await discFetch(`/ifo/${ifoName}`);
@@ -474,8 +460,6 @@ async function loadDiscFiles(mod: DvdnavModule, slug: string): Promise<LoadState
       }
     }),
   );
-
-  console.log(`[dvdnav] Phase 2: loaded ${vtsMenuVobs.length} VTS menu VOBs`);
 
   return { vtsPath, mod, slug, vtsMenuPgcs, loadedSectors, vobBuffers };
 }
@@ -583,7 +567,6 @@ export class DvdSession {
     }
 
     const vobName = `VTS_${String(vtsN).padStart(2, "0")}_0.VOB`;
-    console.log(`[dvdnav] On-demand loading sectors ${firstSector}-${lastSector} from ${vobName}`);
 
     const apiBase = `/api/disc/${encodeURIComponent(this.loadState.slug)}`;
     const resp = await fetch(
@@ -606,9 +589,6 @@ export class DvdSession {
     loaded.push({ firstSector, lastSector, durationMs: 0 });
     this.loadState.loadedSectors.set(vtsN, mergeRanges(loaded));
 
-    console.log(
-      `[dvdnav] Loaded ${data.byteLength} bytes for sectors ${firstSector}-${lastSector}`,
-    );
     return true;
   }
 

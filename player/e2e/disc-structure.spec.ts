@@ -164,25 +164,6 @@ test.describe("DVD menu navigation", () => {
     expect(src).toContain("/transcode/");
   });
 
-  test("VTS menu VOBs are loaded before dvd_open", async ({ page }) => {
-    const logs: string[] = [];
-    page.on("console", (msg) => logs.push(msg.text()));
-
-    await page.goto("/#/disc/Test%20Disc");
-    await waitForMenu(page);
-
-    // Phase 1 should have loaded IFOs + VMGM VOB only
-    const phase1Log = logs.find((l) => l.includes("Phase 1:"));
-    expect(phase1Log).toBeTruthy();
-    expect(phase1Log).toContain("IFO/BUP");
-    expect(phase1Log).toContain("VMGM VOB");
-
-    // Phase 2 should have loaded VTS menu VOBs (blocking, before dvd_open)
-    const phase2Log = logs.find((l) => l.includes("Phase 2:"));
-    expect(phase2Log).toBeTruthy();
-    expect(phase2Log).toContain("VTS menu VOB");
-  });
-
   test("title switching from menu changes video source", async ({ page }) => {
     await page.goto("/#/disc/Test%20Disc");
     await waitForMenu(page);
