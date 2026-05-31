@@ -1,0 +1,40 @@
+[Unit]
+Description=webdvd — browser-based DVD player
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=webdvd
+Group=webdvd
+WorkingDirectory=/opt/webdvd
+
+# PLAYER_PASSWORD and any tunable flags live in this file; not committed.
+# See deploy/README.md for the template.
+EnvironmentFile=/etc/webdvd.env
+
+ExecStart=/opt/webdvd/webdvd-server /data/discs \
+    --port 3000 \
+    --cache-dir /var/cache/webdvd \
+    --max-concurrent-transcodes ${MAX_CONCURRENT_TRANSCODES} \
+    --transcode-queue-timeout-secs ${TRANSCODE_QUEUE_TIMEOUT_SECS}
+
+Restart=always
+RestartSec=2
+
+# Hardening — webdvd only needs to read its source dirs and write the cache
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/cache/webdvd
+ReadOnlyPaths=/data/discs
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,28 @@
+dvd.paikjones.com {
+    encode gzip zstd
+
+    # API + auth + transcode endpoints go to the Rust server
+    handle /api/* {
+        reverse_proxy localhost:3000 {
+            # Transcode responses are long-lived streaming bodies;
+            # disable Caddy's flush buffering so video starts immediately.
+            flush_interval -1
+            # Allow long ffmpeg-backed responses.
+            transport http {
+                read_timeout 4h
+            }
+        }
+    }
+
+    # Everything else: static player files (HTML/JS/WASM/CSS).
+    # Fallback to index.html for SPA hash-routed paths.
+    handle {
+        root * /opt/webdvd/static
+        try_files {path} /index.html
+        file_server
+    }
+
+    log {
+        output file /var/log/caddy/webdvd.log
+    }
+}
