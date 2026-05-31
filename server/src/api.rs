@@ -9,7 +9,7 @@ use axum::{
 };
 use tower_http::cors::CorsLayer;
 
-use crate::{AppState, disc::Disc, transcode};
+use crate::{AppState, cache, disc::Disc, transcode};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -179,6 +179,18 @@ struct TranscodeParams {
     last_sector: Option<u64>,
 }
 
+fn cache_key(slug: &str, kind: cache::Kind, titleset: u32, p: &TranscodeParams) -> cache::CacheKey {
+    cache::CacheKey {
+        slug: slug.to_string(),
+        kind,
+        titleset,
+        sector: p.sector,
+        last_sector: p.last_sector,
+        start_ms: cache::secs_to_ms(p.ss),
+        duration_ms: cache::secs_to_ms(p.t),
+    }
+}
+
 /// Transcode a menu VOB (titleset=0 for VMGM, N for VTS_N menu).
 async fn transcode_menu(
     State(state): State<AppState>,
@@ -186,6 +198,12 @@ async fn transcode_menu(
     Query(params): Query<TranscodeParams>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let disc = get_disc(&state, &slug)?;
+    let key = cache_key(&slug, cache::Kind::Menu, titleset, &params);
+
+    if let Some(body) = state.cache.serve_if_cached(&key).await {
+        return Ok(([(axum::http::header::CONTENT_TYPE, "video/mp4")], body));
+    }
+
     let vobs = disc.menu_vobs(titleset);
     if vobs.is_empty() {
         return Err((
@@ -201,9 +219,11 @@ async fn transcode_menu(
         last_sector: params.last_sector,
     };
 
-    let body = transcode::transcode_to_stream(&vobs, &opts, &disc, titleset, true)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let body = transcode::transcode_to_stream(
+        &vobs, &opts, &disc, titleset, true, state.cache.clone(), key,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok((
         [(axum::http::header::CONTENT_TYPE, "video/mp4")],
@@ -217,6 +237,12 @@ async fn transcode_titleset(
     Query(params): Query<TranscodeParams>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let disc = get_disc(&state, &slug)?;
+    let key = cache_key(&slug, cache::Kind::Title, titleset, &params);
+
+    if let Some(body) = state.cache.serve_if_cached(&key).await {
+        return Ok(([(axum::http::header::CONTENT_TYPE, "video/mp4")], body));
+    }
+
     let vobs = disc.vobs_for_titleset(titleset);
     if vobs.is_empty() {
         return Err((
@@ -232,9 +258,11 @@ async fn transcode_titleset(
         last_sector: params.last_sector,
     };
 
-    let body = transcode::transcode_to_stream(&vobs, &opts, &disc, titleset, false)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let body = transcode::transcode_to_stream(
+        &vobs, &opts, &disc, titleset, false, state.cache.clone(), key,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok((
         [(axum::http::header::CONTENT_TYPE, "video/mp4")],

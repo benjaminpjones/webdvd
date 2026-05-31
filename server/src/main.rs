@@ -1,4 +1,5 @@
 mod api;
+mod cache;
 mod disc;
 #[cfg(has_dvdread)]
 mod dvdread;
@@ -18,11 +19,16 @@ struct Args {
     /// Port to listen on
     #[arg(short, long, default_value = "3000")]
     port: u16,
+
+    /// Directory to store transcoded segments. Defaults to <root>/.cache/.
+    #[arg(long)]
+    cache_dir: Option<PathBuf>,
 }
 
 #[derive(Clone)]
 pub struct AppState {
     pub library: Arc<library::Library>,
+    pub cache: Arc<cache::Cache>,
 }
 
 #[tokio::main]
@@ -46,8 +52,13 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    let cache_dir = args.cache_dir.unwrap_or_else(|| args.root.join(".cache"));
+    std::fs::create_dir_all(&cache_dir)?;
+    tracing::info!("Transcode cache at {}", cache_dir.display());
+
     let state = AppState {
         library: Arc::new(lib),
+        cache: Arc::new(cache::Cache::new(cache_dir)),
     };
 
     let app = api::router(state);

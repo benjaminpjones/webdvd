@@ -3,8 +3,8 @@ use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use tokio_util::io::ReaderStream;
 
+use crate::cache::{Cache, CacheKey};
 use crate::disc::Disc;
 
 /// Transcode options for extracting a specific segment.
@@ -36,6 +36,8 @@ pub async fn transcode_to_stream(
     disc: &Arc<Disc>,
     titleset: u32,
     is_menu: bool,
+    cache: Arc<Cache>,
+    key: CacheKey,
 ) -> anyhow::Result<axum::body::Body> {
     if vob_files.is_empty() {
         anyhow::bail!("No VOB files to transcode");
@@ -101,20 +103,17 @@ pub async fn transcode_to_stream(
         .take()
         .ok_or_else(|| anyhow::anyhow!("Failed to capture ffmpeg stdout"))?;
 
-    // Spawn a background task to wait for ffmpeg to finish and keep the
-    // concat tempfile alive for the duration of the transcode.
-    tokio::spawn(async move {
-        let status = child.wait().await;
-        drop(concat_file); // keep tempfile alive until ffmpeg exits
-        match status {
-            Ok(s) if s.success() => tracing::info!("ffmpeg exited successfully"),
-            Ok(s) => tracing::warn!("ffmpeg exited with status: {s}"),
-            Err(e) => tracing::error!("ffmpeg wait error: {e}"),
-        }
-    });
-
-    let stream = ReaderStream::new(stdout);
-    Ok(axum::body::Body::from_stream(stream))
+    // Tee ffmpeg's stdout to both the HTTP response and a cache .tmp file.
+    // The background task owns the Child (calls child.wait() to detect
+    // success/failure) and the concat_file (kept alive until exit).
+    let body = crate::cache::spawn_tee_and_finalize(
+        cache,
+        key,
+        stdout,
+        child,
+        concat_file,
+    );
+    Ok(body)
 }
 
 /// Build the ffmpeg argument vector for a transcode call.
