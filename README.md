@@ -249,4 +249,6 @@ Some DVDs interleave multiple angles at the VOBU level within a single VOB — e
 
 ## License
 
-MIT
+AGPL-3.0-or-later. See [LICENSE](LICENSE).
+
+Why AGPL: webdvd is a network service. AGPL ensures that anyone who modifies it and runs it as a hosted service (not just anyone who redistributes the binary) must publish their changes. Compatible with libdvdread's GPL-2.0-or-later, which webdvd links against for CSS decryption.
