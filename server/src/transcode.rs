@@ -38,6 +38,7 @@ pub async fn transcode_to_stream(
     is_menu: bool,
     cache: Arc<Cache>,
     key: CacheKey,
+    permit: tokio::sync::OwnedSemaphorePermit,
 ) -> anyhow::Result<axum::body::Body> {
     if vob_files.is_empty() {
         anyhow::bail!("No VOB files to transcode");
@@ -105,13 +106,15 @@ pub async fn transcode_to_stream(
 
     // Tee ffmpeg's stdout to both the HTTP response and a cache .tmp file.
     // The background task owns the Child (calls child.wait() to detect
-    // success/failure) and the concat_file (kept alive until exit).
+    // success/failure), the concat_file (kept alive until exit), and the
+    // concurrency-limit permit (released when ffmpeg exits, so the next
+    // queued request can proceed).
     let body = crate::cache::spawn_tee_and_finalize(
         cache,
         key,
         stdout,
         child,
-        concat_file,
+        (concat_file, permit),
     );
     Ok(body)
 }

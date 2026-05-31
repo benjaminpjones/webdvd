@@ -260,6 +260,36 @@ struct TranscodeParams {
     last_sector: Option<u64>,
 }
 
+/// Acquire a transcode-slot permit with timeout. Returns 503 if the queue
+/// times out — cache hits should be checked BEFORE calling this so they
+/// don't consume a slot.
+async fn acquire_transcode_slot(
+    state: &AppState,
+) -> Result<tokio::sync::OwnedSemaphorePermit, (StatusCode, String)> {
+    match tokio::time::timeout(
+        state.transcode_queue_timeout,
+        state.transcode_limit.clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Transcode semaphore closed".into(),
+        )),
+        Err(_) => {
+            tracing::warn!(
+                "Transcode queue timeout after {:?} — all slots in use",
+                state.transcode_queue_timeout,
+            );
+            Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Server busy — too many transcodes in flight. Try again in a few seconds.".into(),
+            ))
+        }
+    }
+}
+
 fn cache_key(slug: &str, kind: cache::Kind, titleset: u32, p: &TranscodeParams) -> cache::CacheKey {
     cache::CacheKey {
         slug: slug.to_string(),
@@ -301,8 +331,10 @@ async fn transcode_menu(
         last_sector: params.last_sector,
     };
 
+    let permit = acquire_transcode_slot(&state).await?;
+
     let body = transcode::transcode_to_stream(
-        &vobs, &opts, &disc, titleset, true, state.cache.clone(), key,
+        &vobs, &opts, &disc, titleset, true, state.cache.clone(), key, permit,
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -341,8 +373,10 @@ async fn transcode_titleset(
         last_sector: params.last_sector,
     };
 
+    let permit = acquire_transcode_slot(&state).await?;
+
     let body = transcode::transcode_to_stream(
-        &vobs, &opts, &disc, titleset, false, state.cache.clone(), key,
+        &vobs, &opts, &disc, titleset, false, state.cache.clone(), key, permit,
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
