@@ -47,7 +47,7 @@ Point webdvd at a `VIDEO_TS` folder and relive 1999 in a browser tab.
 
 **Server (Rust):** A local axum server reads a `VIDEO_TS` directory and streams transcoded MPEG-2/AC-3 video as H.264/AAC fMP4 on the fly via ffmpeg. The browser gets standard MP4 it can play natively. The transcode streams as ffmpeg produces fragments — playback starts within seconds, not after the whole file is transcoded.
 
-**Navigation (WASM):** The canonical `libdvdnav` and `libdvdread` C libraries are compiled to WebAssembly via Emscripten. This gives us battle-tested DVD navigation — the same code that powers VLC and Kodi — running in the browser. The VM executes IFO commands, manages registers, handles PGC chains, and drives the entire disc experience. Both IFO and VOB files are loaded into Emscripten's MEMFS so the VM can read navigation packets and drive block-level playback.
+**Navigation (WASM):** The canonical `libdvdnav` and `libdvdread` C libraries are compiled to WebAssembly via Emscripten. This gives us battle-tested DVD navigation — the same code that powers VLC and Kodi — running in the browser. The VM executes IFO commands, manages registers, handles PGC chains, and drives the entire disc experience. IFO files are loaded into Emscripten's MEMFS; VOB files are **not** — the VM reads its navigation packets on demand. The server extracts just the NAV packs from a menu VOB (a few MB instead of the hundreds of MB of menu video) and the player serves the VM's block reads from that, so even large animated menus open in seconds. The actual video is transcoded separately and never passes through the VM.
 
 **Session Manager (TypeScript):** On page load, the session manager "inserts the disc" by running the First Play PGC through the WASM VM. It spins the `dvdnav_get_next_block()` event loop (discarding MPEG-2 data, processing only navigation events like CELL_CHANGE, VTS_CHANGE, HIGHLIGHT, STILL_FRAME, HOP_CHANNEL, STOP) to determine what to play. If the disc lands in a menu, the overlay shows button highlights and waits for user input. If it lands in a title, the server is told to transcode that titleset. Button activation re-enters the event loop, using `awaitingTransition` tracking to skip stale menu cells until the VM completes the jump. Chapter seeks use sector-based offsets for fast startup; title switches require a new transcode request (~1-2s for ffmpeg startup).
 
@@ -142,7 +142,7 @@ The test disc includes a VMGM root menu (4 buttons: Title 1, Title 2, Title 4, C
 
 ```
 server/              Rust server (axum) — VIDEO_TS serving + streaming ffmpeg transcode
-  src/api.rs         HTTP endpoints (/api/disc, /api/transcode, /api/ifo/*, /api/vob/*, /api/vob-range/*)
+  src/api.rs         HTTP endpoints (/api/disc, /api/transcode, /api/ifo/*, /api/vob/*, /api/vob-range/*, /api/.../vob-size/*, /api/.../menu-nav/*)
   src/transcode.rs   ffmpeg spawn + streaming fMP4 output + ILVU filtering
   src/disc.rs        VIDEO_TS directory scanner
 player/              TypeScript + Vite browser app
@@ -169,13 +169,17 @@ scripts/             Dev utilities (test disc generation with menus via dvdautho
 
 The core of playback is `dvd_get_next_event()` in `glue.c`. It loops `dvdnav_get_next_block()` internally, **discarding MPEG-2 block data** (the server handles transcoding), and returns JSON only on navigation events. This avoids thousands of JS↔WASM round trips per second. The function has a 50k iteration safety cap to prevent infinite WASM hangs.
 
-### MEMFS requirements
+### On-demand VOB reads
 
-The WASM VM needs **both IFO and VOB files** in Emscripten's MEMFS to function. IFO files provide structure; VOB files contain the NAV packs that `dvdnav_get_next_block()` reads for navigation decisions. Without VOBs, the VM cannot navigate.
+The VM needs NAV packs to navigate, but a menu VOB can be hundreds of MB and the VM discards the video anyway. So VOBs are **not** preloaded into MEMFS:
 
-Loading happens in two blocking phases before `dvd_open()`:
-1. **Phase 1:** All IFO/BUP files + VMGM (top-level menu) VOBs
-2. **Phase 2:** VTS menu VOBs — small VOBs are fetched fully; large VOBs (>1MB) use **per-PGC partial loading**, fetching only the root menu PGC's cell sectors and filling the rest with zeros. Sub-menu cells are loaded on demand at CELL_CHANGE via `ensureMenuCellLoaded()`.
+1. **IFO/BUP files** are loaded into MEMFS normally (small).
+2. **VOB files** become 0-byte MEMFS placeholders whose size is faked via `node.usedBytes`, so libdvdread's `stat()` computes the right block count without allocating.
+3. libdvdread's `dvd_input.c` is overridden (`wasm/src/dvd_input.c`, compiled from our tree instead of the pinned submodule). Its `file_read`/`file_seek` for `*.VOB` call an `EM_ASYNC_JS` bridge (`dvdread_fetch_blocks` in `glue.c`) into `Module.onVobRead`; the WASM is built with `-sASYNCIFY` so the synchronous read can suspend across the call.
+4. Before `dvd_open()`, the player preloads each menu VOB's NAV packs — `GET /api/disc/{slug}/menu-nav/{vob}` walks the VOB VOBU-by-VOBU server-side and returns a sparse `[u32 sector][2048-byte NAV pack]` stream (a few MB). `onVobRead` serves the VM's reads from this map: NAV pack where one exists, zeros elsewhere. The VM walks the whole menu — even a 50s+ animation — at memory speed.
+5. **Title VOBs** stay empty (size 0), so the VM hits EOF and skips auto-play intro titles instead of streaming them; title video is delivered by the transcoder.
+
+SPU subpicture data (for button-highlight overlays) isn't in the NAV-only map, so it's fetched separately on demand via `/vob-range`.
 
 Both phases complete before the VM opens the disc, eliminating timing races between JS fetches and the C code's internal `fopen` calls.
 
@@ -228,7 +232,7 @@ Some DVDs interleave multiple angles at the VOBU level within a single VOB — e
 - [x] Full menu → movie → menu flow
 - [x] On-screen DVD remote (arrows, OK, Menu)
 - [x] Subpicture stream parsing and RLE decoding
-- [x] Per-PGC partial VOB loading (large menu VOBs load only the root PGC's cells; sub-menu cells fetched on demand at CELL_CHANGE)
+- [x] On-demand menu loading (server extracts NAV packs via `/menu-nav`; the VM reads from a sparse NAV map instead of preloading the full menu VOB — e.g. 328 MB → ~3 MB for a large animated menu)
 - [x] Menu intro animation support (overlay hidden during intro, shown when NAV pack PCI `hli_ss` indicates active highlights)
 
 ### M4: Full Experience
