@@ -48,6 +48,8 @@ emcc $BUILD_DIR/obj/*.o \
   -s FORCE_FILESYSTEM=1 \
   -s NO_EXIT_RUNTIME=1 \
   -s ENVIRONMENT=web,node \
+  -s ASYNCIFY=1 \
+  -s ASYNCIFY_STACK_SIZE=24576 \
   -O2
 
 # Copy to player public dir for Vite to serve
