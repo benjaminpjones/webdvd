@@ -20,10 +20,15 @@ DVDREAD_INCLUDES="$OVERRIDE_INCLUDES -I$DVDREAD_SRC -I$DVDREAD_SRC/dvdread"
 DVDNAV_INCLUDES="$OVERRIDE_INCLUDES -I$DVDNAV_SRC -I$DVDNAV_SRC/dvdnav -I$DVDNAV_SRC/vm $DVDREAD_INCLUDES"
 
 echo "=== Compiling libdvdread ==="
-for f in bitreader dvd_input dvd_reader dvd_udf ifo_print ifo_read logger md5 nav_print nav_read; do
+for f in bitreader dvd_reader dvd_udf ifo_print ifo_read logger md5 nav_print nav_read; do
   echo "  $f.c"
   emcc $COMMON_FLAGS $DVDREAD_INCLUDES -c "$DVDREAD_SRC/$f.c" -o "$BUILD_DIR/obj/dr_$f.o"
 done
+# dvd_input.c is overridden in wasm/src/ to fetch VOB blocks on demand via the
+# JS bridge (see glue.c) instead of reading from MEMFS. Compiled from our tree
+# so the change survives submodule updates.
+echo "  dvd_input.c (override)"
+emcc $COMMON_FLAGS $DVDREAD_INCLUDES -c "$SCRIPT_DIR/src/dvd_input.c" -o "$BUILD_DIR/obj/dr_dvd_input.o"
 
 echo "=== Compiling libdvdnav ==="
 for f in dvdnav read_cache navigation highlight searching settings logger; do

@@ -26,6 +26,8 @@ export const DVDNAV_WAIT = 13;
 interface EmscriptenFS {
   mkdir(path: string): void;
   writeFile(path: string, data: Uint8Array): void;
+  /** Resolve a path to its FS node (MEMFS node exposes usedBytes). */
+  lookupPath(path: string): { node: { usedBytes: number } };
 }
 
 interface DvdnavModule {
@@ -33,8 +35,16 @@ interface DvdnavModule {
     name: string,
     returnType: string | null,
     argTypes: string[],
+    opts?: { async?: boolean },
   ): (...args: unknown[]) => unknown;
   FS: EmscriptenFS;
+  /**
+   * On-demand VOB block fetch, registered by loadDiscFiles and invoked from
+   * C (EM_ASYNC_JS dvdread_fetch_blocks) whenever libdvdread reads a *.VOB.
+   * `path` is the MEMFS path; returns up to `count` 2048-byte blocks starting
+   * at `startBlock`.
+   */
+  onVobRead?: (path: string, startBlock: number, count: number) => Promise<Uint8Array>;
 }
 
 interface DvdnavBindings {
@@ -45,7 +55,8 @@ interface DvdnavBindings {
   partPlay: (title: number, part: number) => number;
   stillSkip: () => number;
   waitSkip: () => number;
-  getNextEvent: () => string;
+  /** Async: drives libdvdnav, which fetches VOB blocks on demand (Asyncify). */
+  getNextEvent: () => Promise<string>;
   getCurrentTitle: () => number;
   getCurrentPart: () => number;
   isDomainVts: () => number;
@@ -204,7 +215,9 @@ function bindFunctions(mod: DvdnavModule): DvdnavBindings {
     partPlay: w("dvd_part_play", "number", ["number", "number"]) as DvdnavBindings["partPlay"],
     stillSkip: w("dvd_still_skip", "number", []) as DvdnavBindings["stillSkip"],
     waitSkip: w("dvd_wait_skip", "number", []) as DvdnavBindings["waitSkip"],
-    getNextEvent: w("dvd_get_next_event", "string", []) as DvdnavBindings["getNextEvent"],
+    getNextEvent: mod.cwrap("dvd_get_next_event", "string", [], {
+      async: true,
+    }) as DvdnavBindings["getNextEvent"],
     getCurrentTitle: w("dvd_get_current_title", "number", []) as DvdnavBindings["getCurrentTitle"],
     getCurrentPart: w("dvd_get_current_part", "number", []) as DvdnavBindings["getCurrentPart"],
     isDomainVts: w("dvd_is_domain_vts", "number", []) as DvdnavBindings["isDomainVts"],
@@ -289,10 +302,12 @@ export interface LoadState {
   slug: string;
   /** Per-VTS: parsed PGC cell info from IFO */
   vtsMenuPgcs: Map<number, import("./ifo-parser").PgcCells[]>;
-  /** Per-VTS: sector ranges already loaded in MEMFS */
-  loadedSectors: Map<number, import("./ifo-parser").CellRange[]>;
-  /** Per-VTS: full VOB buffer (kept in JS for incremental updates) */
-  vobBuffers: Map<number, Uint8Array>;
+  /**
+   * Fetch a sector range of a VOB from the server, with caching. Backs both
+   * the VM's on-demand reads (via mod.onVobRead) and SPU demuxing (via
+   * getMenuVobData), so blocks the VM already pulled are reused for free.
+   */
+  fetchVob: (vobName: string, startBlock: number, count: number) => Promise<Uint8Array>;
 }
 
 /**
@@ -324,147 +339,129 @@ async function loadDiscFiles(mod: DvdnavModule, slug: string): Promise<LoadState
     mod.FS.writeFile(`${vtsPath}/${name}`, buf);
   };
 
-  // --- Phase 1 (blocking): IFOs/BUPs + VMGM VOB ---
-  const vmgmVobs = allVobs.filter((name) => name.startsWith("VIDEO_TS"));
+  // Preload all IFO/BUP files into MEMFS — small, and libdvdread/libdvdnav
+  // read them synchronously during open and navigation.
+  await Promise.all(ifoFiles.map((name) => fetchFile(name, "ifo")));
 
-  // Fetch VMGM VOBs, retain raw bytes for SPU demuxing
-  const vmgmVobBufs: Uint8Array[] = [];
-  const fetchVmgmVob = async (name: string) => {
-    const resp = await discFetch(`/vob/${name}`);
-    if (!resp.ok) throw new Error(`Failed to fetch ${name}: ${resp.statusText}`);
-    const buf = new Uint8Array(await resp.arrayBuffer());
-    mod.FS.writeFile(`${vtsPath}/${name}`, buf);
-    vmgmVobBufs.push(buf);
+  // --- On-demand VOB backing ---------------------------------------------
+  // VOBs are NOT preloaded. Each gets a 0-byte MEMFS placeholder whose
+  // reported size (node.usedBytes) matches the real file, so libdvdread
+  // computes the correct block count from stat() without us allocating the
+  // bytes. Blocks are fetched from the server only when the VM reads them
+  // (see mod.onVobRead below, driven from dvd_input.c).
+  const sizes = await Promise.all(
+    allVobs.map(async (name) => {
+      const r = await discFetch(`/vob-size/${name}`);
+      const size = r.ok ? (((await r.json()) as { size: number }).size ?? 0) : 0;
+      return [name, size] as const;
+    }),
+  );
+  // Only MENU VOBs (VIDEO_TS.VOB, VTS_nn_0.VOB) are read by the VM and served
+  // on demand. Title VOBs (VTS_nn_1.VOB …) are left as empty 0-byte
+  // placeholders: their video is delivered by the server transcoder, never the
+  // VM, and an empty title VOB makes the VM cleanly hit EOF and skip auto-play
+  // intro titles (e.g. studio-logo animations the First Play PGC jumps to)
+  // instead of streaming all of them block-by-block. This preserves the old
+  // preload's "title skip" behavior while making menus lazy.
+  const isMenuVob = (name: string) => name === "VIDEO_TS.VOB" || /^VTS_\d+_0\.VOB$/.test(name);
+  for (const [name, size] of sizes) {
+    const p = `${vtsPath}/${name}`;
+    mod.FS.writeFile(p, new Uint8Array(0));
+    // MEMFS getattr returns node.usedBytes as st_size, so this makes stat()
+    // report the real size with no allocation. VOB content never flows
+    // through MEMFS reads (intercepted in dvd_input.c), so empty contents are
+    // harmless.
+    if (isMenuVob(name)) {
+      mod.FS.lookupPath(p).node.usedBytes = size;
+    }
+  }
+
+  const EMPTY = new Uint8Array(0);
+
+  // Preload NAV packs for each menu VOB. The server walks the VOB and returns
+  // ONLY the NAV packs (a few hundred KB) as [u32 LE sector][2048 bytes]
+  // records, instead of the hundreds of MB of menu video. The VM reads its
+  // navigation data from these — reconstructed as a sparse VOB (NAV packs at
+  // their sectors, zeros elsewhere) — at memory speed, so even a long animated
+  // menu reaches its interactive point instantly. The VM never needs the video
+  // (the transcoder serves that), so zeros for non-NAV sectors are fine.
+  const navMaps = new Map<string, Map<number, Uint8Array>>();
+  const parseNavStream = (buf: Uint8Array): Map<number, Uint8Array> => {
+    const map = new Map<number, Uint8Array>();
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    for (let pos = 0; pos + 2052 <= buf.length; pos += 2052) {
+      map.set(dv.getUint32(pos, true), buf.subarray(pos + 4, pos + 4 + 2048));
+    }
+    return map;
   };
-
-  await Promise.all([
-    ...ifoFiles.map((name) => fetchFile(name, "ifo")),
-    ...vmgmVobs.map((name) => fetchVmgmVob(name)),
-  ]);
-
-  // Create 0-byte placeholders for ALL VTS VOBs (menu + title).
-  // libdvdread needs these files to exist or DVDOpenFile fails.
-  const vmgmSet = new Set(vmgmVobs);
-  if (!vmgmSet.has("VIDEO_TS.VOB")) {
-    mod.FS.writeFile(`${vtsPath}/VIDEO_TS.VOB`, new Uint8Array(0));
-  }
-  for (const ifo of ifoFiles) {
-    const m = ifo.match(/^(VTS_\d+)_0\.IFO$/);
-    if (m) {
-      mod.FS.writeFile(`${vtsPath}/${m[1]}_0.VOB`, new Uint8Array(0));
-      mod.FS.writeFile(`${vtsPath}/${m[1]}_1.VOB`, new Uint8Array(0));
-    }
-  }
-
-  // --- Phase 2 (blocking): VTS menu VOB loading with per-PGC partial fetch ---
-  const vtsMenuPgcs = new Map<number, import("./ifo-parser").PgcCells[]>();
-  const loadedSectors = new Map<number, import("./ifo-parser").CellRange[]>();
-  const vobBuffers = new Map<number, Uint8Array>();
-
-  // Store VMGM VOB data for SPU demuxing (VTS 0 = VMGM)
-  if (vmgmVobBufs.length === 1) {
-    vobBuffers.set(0, vmgmVobBufs[0]);
-  } else if (vmgmVobBufs.length > 1) {
-    const totalLen = vmgmVobBufs.reduce((sum, b) => sum + b.length, 0);
-    const combined = new Uint8Array(totalLen);
-    let off = 0;
-    for (const b of vmgmVobBufs) {
-      combined.set(b, off);
-      off += b.length;
-    }
-    vobBuffers.set(0, combined);
-  }
-
-  // ifo-parser was preloaded in parallel with Phase 1
-  const { parseMenuPgcs, mergeRanges } = await ifoParserPromise;
-
-  const vtsMenuVobs = allVobs.filter((name) => name.match(/^VTS_\d+_0\.VOB$/));
-
-  // Load all VTS menu VOBs before returning — eliminates MEMFS timing race
-  // with C code that opens VOB files during dvdnav_get_next_block.
   await Promise.all(
-    vtsMenuVobs.map(async (vobName) => {
-      const m = vobName.match(/^VTS_(\d+)_0\.VOB$/);
-      if (!m) return;
-      const vtsN = parseInt(m[1], 10);
-      const ifoName = `VTS_${m[1]}_0.IFO`;
-
-      // Check VOB size via the cheap metadata endpoint to decide full vs
-      // partial loading. A HEAD on /vob would run the full read handler
-      // server-side (axum routes HEAD to the GET handler), reading — and on a
-      // CSS disc, decrypting — the entire VOB just to discard the body.
-      const sizeResp = await discFetch(`/vob-size/${vobName}`);
-      if (!sizeResp.ok) return;
-      const totalSize = ((await sizeResp.json()) as { size: number }).size ?? 0;
-
-      if (totalSize > 1024 * 1024) {
-        // Large VOB — try per-PGC partial loading
-        const ifoResp = await discFetch(`/ifo/${ifoName}`);
-        let pgcs: import("./ifo-parser").PgcCells[] = [];
-        if (ifoResp.ok) {
-          pgcs = parseMenuPgcs(await ifoResp.arrayBuffer());
-          vtsMenuPgcs.set(vtsN, pgcs);
-        }
-
-        const allCells = mergeRanges(pgcs.flatMap((p) => p.cells));
-        const menuBytes = allCells.reduce(
-          (sum, r) => sum + (r.lastSector - r.firstSector + 1) * 2048,
-          0,
-        );
-
-        const buf = new Uint8Array(totalSize);
-        vobBuffers.set(vtsN, buf);
-
-        if (menuBytes > 0 && menuBytes < totalSize * 0.75) {
-          // Fetch cells for all menu PGCs (intro animations, root, submenus).
-          // Sequential to avoid disc seek thrashing on physical drives.
-          for (const range of allCells) {
-            const resp = await discFetch(
-              `/vob-range/${vobName}?start=${range.firstSector}&end=${range.lastSector}`,
-            );
-            if (!resp.ok) continue;
-            const data = new Uint8Array(await resp.arrayBuffer());
-            buf.set(data, range.firstSector * 2048);
-          }
-
-          mod.FS.writeFile(`${vtsPath}/${vobName}`, buf);
-          loadedSectors.set(vtsN, [...allCells]);
-        } else {
-          // Root covers most of VOB — download full
-          const resp = await discFetch(`/vob/${vobName}`);
-          if (!resp.ok) return;
-          const data = new Uint8Array(await resp.arrayBuffer());
-          buf.set(data);
-          mod.FS.writeFile(`${vtsPath}/${vobName}`, buf);
-          const totalSectors = Math.ceil(data.byteLength / 2048);
-          loadedSectors.set(vtsN, [
-            { firstSector: 0, lastSector: totalSectors - 1, durationMs: 0 },
-          ]);
-        }
-      } else {
-        // Small VOB — download fully
-        const resp = await discFetch(`/vob/${vobName}`);
-        if (!resp.ok) return;
-        const data = new Uint8Array(await resp.arrayBuffer());
-        if (data.byteLength > 0) {
-          mod.FS.writeFile(`${vtsPath}/${vobName}`, data);
-          vobBuffers.set(vtsN, data);
-          const totalSectors = Math.ceil(data.byteLength / 2048);
-          loadedSectors.set(vtsN, [
-            { firstSector: 0, lastSector: totalSectors - 1, durationMs: 0 },
-          ]);
-        }
-        // Parse IFO for on-demand metadata
-        const ifoResp = await discFetch(`/ifo/${ifoName}`);
-        if (ifoResp.ok) {
-          const pgcs = parseMenuPgcs(await ifoResp.arrayBuffer());
-          vtsMenuPgcs.set(vtsN, pgcs);
-        }
-      }
+    allVobs.filter(isMenuVob).map(async (name) => {
+      const resp = await discFetch(`/menu-nav/${name}`);
+      if (resp.ok) navMaps.set(name, parseNavStream(new Uint8Array(await resp.arrayBuffer())));
     }),
   );
 
-  return { vtsPath, mod, slug, vtsMenuPgcs, loadedSectors, vobBuffers };
+  // C → JS bridge (dvd_input.c). Serve menu-VOB reads from the preloaded NAV
+  // map — NAV pack where one exists, zeros elsewhere — with no network during
+  // navigation. Title VOBs report empty (EOF) so the VM skips intro titles
+  // instead of streaming them.
+  mod.onVobRead = (path: string, startBlock: number, count: number) => {
+    const navMap = navMaps.get(path.slice(path.lastIndexOf("/") + 1));
+    if (!navMap) return Promise.resolve(EMPTY);
+    const out = new Uint8Array(count * 2048);
+    for (let i = 0; i < count; i++) {
+      const nav = navMap.get(startBlock + i);
+      if (nav) out.set(nav, i * 2048);
+    }
+    return Promise.resolve(out);
+  };
+
+  // Real VOB bytes for SPU demux (getMenuVobData) — fetched on demand with a
+  // small LRU cache. The NAV-only maps above carry no subpicture data, so the
+  // button-highlight overlay reads real sectors from here.
+  const blockCache = new Map<string, Uint8Array>();
+  const CACHE_CAP = 256;
+  const fetchVob = async (
+    vobName: string,
+    startBlock: number,
+    count: number,
+  ): Promise<Uint8Array> => {
+    if (count <= 0) return EMPTY;
+    const key = `${vobName}:${startBlock}:${count}`;
+    const hit = blockCache.get(key);
+    if (hit) {
+      blockCache.delete(key);
+      blockCache.set(key, hit); // refresh LRU position
+      return hit;
+    }
+    const end = startBlock + count - 1;
+    const resp = await discFetch(`/vob-range/${vobName}?start=${startBlock}&end=${end}`);
+    if (!resp.ok) return EMPTY;
+    const data = new Uint8Array(await resp.arrayBuffer());
+    if (blockCache.size >= CACHE_CAP) {
+      const oldest = blockCache.keys().next().value;
+      if (oldest !== undefined) blockCache.delete(oldest);
+    }
+    blockCache.set(key, data);
+    return data;
+  };
+
+  // Parse menu PGC cell info from each VTS IFO (menu cell sector ranges for
+  // SPU demux + cell timings). IFOs are already in MEMFS; the refetch is a
+  // browser-cache hit thanks to the immutable Cache-Control header.
+  const { parseMenuPgcs } = await ifoParserPromise;
+  const vtsMenuPgcs = new Map<number, import("./ifo-parser").PgcCells[]>();
+  await Promise.all(
+    ifoFiles.map(async (ifo) => {
+      const m = ifo.match(/^VTS_(\d+)_0\.IFO$/);
+      if (!m) return;
+      const resp = await discFetch(`/ifo/${ifo}`);
+      if (!resp.ok) return;
+      vtsMenuPgcs.set(parseInt(m[1], 10), parseMenuPgcs(await resp.arrayBuffer()));
+    }),
+  );
+
+  return { vtsPath, mod, slug, vtsMenuPgcs, fetchVob };
 }
 
 /** Raw JSON shape returned by dvd_describe_title() in the C glue */
@@ -550,53 +547,18 @@ export class DvdSession {
   }
 
   /**
-   * Ensure a menu cell's sectors are loaded in MEMFS.
-   * If the cell's sector range is already loaded, returns immediately.
-   * Otherwise fetches from the server and patches the VOB buffer.
+   * Previously pre-fetched a menu cell's sectors into MEMFS. Now a no-op:
+   * the VM fetches VOB blocks on demand as it reads them (dvd_input.c →
+   * mod.onVobRead), so there's nothing to pre-load. Kept so callers in the
+   * driveVM loop don't need restructuring; always reports "nothing newly
+   * loaded".
    */
-  async ensureMenuCellLoaded(
-    vtsN: number,
-    firstSector: number,
-    lastSector: number,
-  ): Promise<boolean> {
-    if (!this.loadState) return false;
-    if (vtsN <= 0) return false;
-
-    const { isSectorRangeLoaded, mergeRanges } = await import("./ifo-parser");
-
-    const loaded = this.loadState.loadedSectors.get(vtsN) ?? [];
-    if (isSectorRangeLoaded(firstSector, lastSector, loaded)) {
-      return false; // already loaded
-    }
-
-    const vobName = `VTS_${String(vtsN).padStart(2, "0")}_0.VOB`;
-
-    const apiBase = `/api/disc/${encodeURIComponent(this.loadState.slug)}`;
-    const resp = await fetch(
-      `${apiBase}/vob-range/${vobName}?start=${firstSector}&end=${lastSector}`,
-    );
-    if (!resp.ok) {
-      console.warn(`[dvdnav] Failed to fetch sectors: ${resp.statusText}`);
-      return false;
-    }
-
-    const data = new Uint8Array(await resp.arrayBuffer());
-    const buf = this.loadState.vobBuffers.get(vtsN);
-    if (buf) {
-      const byteOffset = firstSector * 2048;
-      buf.set(data, byteOffset);
-      this.loadState.mod.FS.writeFile(`${this.loadState.vtsPath}/${vobName}`, buf);
-    }
-
-    // Track the newly loaded range
-    loaded.push({ firstSector, lastSector, durationMs: 0 });
-    this.loadState.loadedSectors.set(vtsN, mergeRanges(loaded));
-
-    return true;
+  ensureMenuCellLoaded(_vtsN: number, _firstSector: number, _lastSector: number): Promise<boolean> {
+    return Promise.resolve(false);
   }
 
-  getNextEvent(): NavEvent {
-    const json = this.dvd.getNextEvent();
+  async getNextEvent(): Promise<NavEvent> {
+    const json = await this.dvd.getNextEvent();
     const raw = JSON.parse(json) as NavEvent & { isVts?: number | boolean };
     const ev: NavEvent = { event: raw.event };
     if (raw.error) ev.error = raw.error;
@@ -722,17 +684,21 @@ export class DvdSession {
 
   /**
    * Get raw VOB data for a menu cell's sector range (for SPU demuxing).
-   * Returns the slice of the VOB buffer, or null if unavailable.
+   * Fetches the range on demand via the shared cache — blocks the VM already
+   * pulled while navigating into this menu cell are served from cache.
+   * Returns null if unavailable.
    */
-  getMenuVobData(vtsN: number, firstSector: number, lastSector: number): Uint8Array | null {
+  async getMenuVobData(
+    vtsN: number,
+    firstSector: number,
+    lastSector: number,
+  ): Promise<Uint8Array | null> {
     if (!this.loadState) return null;
     // VTS 0 = VMGM (VIDEO_TS.VOB), VTS > 0 = VTS menu VOBs
-    const buf = this.loadState.vobBuffers.get(vtsN);
-    if (!buf) return null;
-    const startByte = firstSector * 2048;
-    const endByte = (lastSector + 1) * 2048;
-    if (startByte >= buf.length) return null;
-    return buf.subarray(startByte, Math.min(endByte, buf.length));
+    const vobName = vtsN === 0 ? "VIDEO_TS.VOB" : `VTS_${String(vtsN).padStart(2, "0")}_0.VOB`;
+    const count = lastSector - firstSector + 1;
+    const data = await this.loadState.fetchVob(vobName, firstSector, count);
+    return data.length > 0 ? data : null;
   }
 
   /**

@@ -320,4 +320,77 @@ impl Disc {
         let path = self.path.join(&upper);
         Ok(std::fs::metadata(&path)?.len())
     }
+
+    /// Extract NAV packs from a (menu) VOB as a sparse stream, so the client can
+    /// reconstruct just the navigation data without downloading the video.
+    ///
+    /// Walks the VOB VOBU-by-VOBU — each VOBU begins with a NAV pack whose DSI
+    /// records the VOBU length — and emits, per NAV pack:
+    ///   [u32 LE sector_index][2048-byte NAV pack]
+    /// The client places these at their sectors (zeros elsewhere) so libdvdnav
+    /// can navigate the whole menu at memory speed. Output is ~2 KB per VOBU
+    /// (~0.5 s of menu), i.e. a few hundred KB even for a long animated menu —
+    /// versus hundreds of MB for the full video.
+    pub fn read_menu_nav(&self, filename: &str) -> anyhow::Result<Vec<u8>> {
+        let mut out = Vec::new();
+
+        #[cfg(has_dvdread)]
+        if let Some((titlenum, domain)) = dvdread::parse_dvd_filename(filename)
+            && let Some(file_result) = self.open_dvd_file(titlenum, domain)
+        {
+            let dvd_file = file_result?;
+            let total = dvd_file.total_blocks() as u32;
+            let mut offset: u32 = 0;
+            while offset < total {
+                let block = dvd_file.read_blocks(offset, 1)?;
+                let Some(vobu_size) = navpack_vobu_size(&block) else {
+                    break;
+                };
+                out.extend_from_slice(&offset.to_le_bytes());
+                out.extend_from_slice(&block[..2048]);
+                offset += vobu_size;
+            }
+            return Ok(out);
+        }
+
+        // Raw fallback (unencrypted discs): seek VOBU-by-VOBU.
+        let upper = filename.to_uppercase();
+        let path = self.path.join(&upper);
+        let total = (std::fs::metadata(&path)?.len() / 2048) as u32;
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = std::fs::File::open(&path)?;
+        let mut buf = vec![0u8; 2048];
+        let mut offset: u32 = 0;
+        while offset < total {
+            file.seek(SeekFrom::Start(offset as u64 * 2048))?;
+            if file.read_exact(&mut buf).is_err() {
+                break;
+            }
+            let Some(vobu_size) = navpack_vobu_size(&buf) else {
+                break;
+            };
+            out.extend_from_slice(&offset.to_le_bytes());
+            out.extend_from_slice(&buf[..2048]);
+            offset += vobu_size;
+        }
+        Ok(out)
+    }
+}
+
+/// If `block` is a DVD NAV pack, return its VOBU length in sectors
+/// (`vobu_ea + 1`). NAV packs begin with an MPEG pack header (`00 00 01 BA`);
+/// the DSI general-information block at sector offset 0x407 holds `vobu_ea`
+/// (the VOBU's last sector, relative to its start) at byte +8.
+fn navpack_vobu_size(block: &[u8]) -> Option<u32> {
+    if block.len() < 0x413 || block[0..4] != [0x00, 0x00, 0x01, 0xBA] {
+        return None;
+    }
+    let dsi = 0x407;
+    let vobu_ea = u32::from_be_bytes([
+        block[dsi + 8],
+        block[dsi + 9],
+        block[dsi + 10],
+        block[dsi + 11],
+    ]);
+    (vobu_ea > 0).then_some(vobu_ea + 1)
 }

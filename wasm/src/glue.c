@@ -21,6 +21,32 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+/*
+ * webdvd: on-demand VOB block fetch. Called from libdvdread's file_read
+ * (dvd_input.c) for *.VOB devices instead of reading from MEMFS. The JS body
+ * awaits Module.onVobRead — registered by the player (dvdnav.ts) — which
+ * fetches the requested sector range from the server and returns a Uint8Array.
+ * EM_ASYNC_JS + -sASYNCIFY suspend the WASM stack across the fetch, so the
+ * synchronous libdvdnav read path keeps working unmodified.
+ *
+ * Returns the number of 2048-byte blocks written into `dst` (may be short at
+ * end-of-file), or -1 on error.
+ */
+EM_ASYNC_JS(int, dvdread_fetch_blocks,
+            (const char *path, int start_block, int count, void *dst), {
+  const name = UTF8ToString(path);
+  let bytes;
+  try {
+    bytes = await Module.onVobRead(name, start_block, count);
+  } catch (e) {
+    console.error("onVobRead failed:", e);
+    return -1;
+  }
+  if (!bytes || bytes.length === 0) return 0;
+  HEAPU8.set(bytes, dst);
+  return (bytes.length / 2048) | 0;
+});
+
 static dvdnav_t *nav = NULL;
 static char dvd_path[256] = {0};  /* stash disc path for IFO reads */
 

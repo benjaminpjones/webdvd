@@ -129,24 +129,39 @@ export class SessionManager {
   /**
    * Parse SPU from the current menu cell's VOB data and build a full MenuState.
    */
-  private buildMenuState(buttons: ButtonInfo[], currentButton: number, clut: number[]): MenuState {
-    const spuImage = this.getMenuSpuImage();
+  /**
+   * Enter the interactive menu state immediately, then fill in the SPU
+   * highlight overlay asynchronously. Interactivity must NOT block on the SPU
+   * fetch: for a large animated menu the SPU sector range can be many MB, and
+   * awaiting it before setState("menu") leaves the menu unclickable (clicks
+   * are dropped while state is still "loading"). Returns null for driveVM.
+   */
+  private enterMenu(buttons: ButtonInfo[], currentButton: number, clut: number[]): null {
     let buttonColors: ButtonColorTable | undefined;
     try {
       buttonColors = this.session.getButtonColors();
     } catch {
       // PCI not available
     }
-    return { buttons, currentButton, clut, spuImage, buttonColors };
+    // Interactive right away — buttons are already known from PCI.
+    this.setMenu({ buttons, currentButton, clut, buttonColors });
+    this.setState("menu");
+    // Fetch the highlight overlay in the background and patch it in.
+    void this.getMenuSpuImage().then((spuImage) => {
+      if (spuImage && this._state === "menu" && this._menuState) {
+        this.setMenu({ ...this._menuState, spuImage });
+      }
+    });
+    return null;
   }
 
-  private getMenuSpuImage(): SpuImage | undefined {
+  private async getMenuSpuImage(): Promise<SpuImage | undefined> {
     const key = `${this.currentVts}:${this.menuFirstSector}-${this.menuLastSector}`;
     if (key === this.cachedSpuKey && this.cachedSpuImage) {
       return this.cachedSpuImage;
     }
 
-    const vobData = this.session.getMenuVobData(
+    const vobData = await this.session.getMenuVobData(
       this.currentVts,
       this.menuFirstSector,
       this.menuLastSector,
@@ -188,7 +203,7 @@ export class SessionManager {
     if (target) {
       this.playTarget(target);
     } else if (this.inState("menu")) {
-      this.loadMenuVideo();
+      void this.loadMenuVideo();
     } else {
       // No menu found via First Play — try jumping directly to the menu.
       // This handles discs where First Play goes through title-domain
@@ -197,7 +212,7 @@ export class SessionManager {
       if (this.session.menuCall(3) || this.session.menuCall(2)) {
         target = await this.driveVM(/* acceptTitles */ false);
         if (this.inState("menu")) {
-          this.loadMenuVideo();
+          void this.loadMenuVideo();
           return;
         }
         if (target) {
@@ -318,7 +333,7 @@ export class SessionManager {
     if (target) {
       this.playTarget(target);
     } else if (this._state === "menu") {
-      this.loadMenuVideo();
+      void this.loadMenuVideo();
     }
   }
 
@@ -336,7 +351,7 @@ export class SessionManager {
     await this.driveVM(/* acceptTitles */ false);
 
     if (this._state === "menu") {
-      this.loadMenuVideo();
+      void this.loadMenuVideo();
       return;
     }
 
@@ -350,7 +365,7 @@ export class SessionManager {
     if (this.session.menuCall(3) || this.session.menuCall(2)) {
       await this.driveVM(/* acceptTitles */ false);
       if (this.inState("menu")) {
-        this.loadMenuVideo();
+        void this.loadMenuVideo();
         return;
       }
     }
@@ -387,7 +402,7 @@ export class SessionManager {
    * (menuButtonSector > menuFirstSector), the overlay is hidden until the
    * intro cells finish, using IFO cell playback durations for timing.
    */
-  private loadMenuVideo(): void {
+  private async loadMenuVideo(): Promise<void> {
     let url = `${this.apiBase}/transcode-menu/${this.currentVts}`;
     const params = new URLSearchParams();
     if (this.menuFirstSector > 0) {
@@ -409,7 +424,8 @@ export class SessionManager {
     // Scan NAV packs in the VOB to find when buttons first appear.
     // This reads the actual PCI highlight data from the disc, matching
     // how a real DVD player discovers button activation timing.
-    const introEndSec = this.menuButtonSector > this.menuFirstSector ? this.getButtonStartPts() : 0;
+    const introEndSec =
+      this.menuButtonSector > this.menuFirstSector ? await this.getButtonStartPts() : 0;
     if (introEndSec > 0) {
       const savedMenu = this._menuState;
       this.setMenu(null); // hide overlay during intro
@@ -450,8 +466,8 @@ export class SessionManager {
    * Returns the highlight start time in seconds relative to the menu
    * video start, or 0 if no buttons found / VOB data unavailable.
    */
-  private getButtonStartPts(): number {
-    const vobData = this.session.getMenuVobData(
+  private async getButtonStartPts(): Promise<number> {
+    const vobData = await this.session.getMenuVobData(
       this.currentVts,
       this.menuFirstSector,
       this.menuLastSector,
@@ -561,7 +577,7 @@ export class SessionManager {
         await new Promise((r) => setTimeout(r, 0));
       }
 
-      const ev = this.session.getNextEvent();
+      const ev = await this.session.getNextEvent();
 
       if (ev.error) {
         // "iteration limit" means the C event loop read through many
@@ -685,9 +701,7 @@ export class SessionManager {
               this.log(
                 `Menu detected via CELL_CHANGE: ${buttons.length} buttons, current=${currentButton}, sector=${this.menuFirstSector}-${this.menuLastSector}`,
               );
-              this.setMenu(this.buildMenuState(buttons, currentButton, clut));
-              this.setState("menu");
-              return null;
+              return this.enterMenu(buttons, currentButton, clut);
             }
             // No buttons but PCI is fresh — the cell genuinely has no
             // buttons. Don't track as intro: the visual menu content may
@@ -721,9 +735,7 @@ export class SessionManager {
             this.log(
               `Menu via STILL_FRAME (${ev.stillLength === 0xff ? "infinite" : ev.stillLength + "s"}): ${stillButtons.length} buttons, current=${currentButton}, sector=${this.menuFirstSector}-${this.menuLastSector}`,
             );
-            this.setMenu(this.buildMenuState(stillButtons, currentButton, clut));
-            this.setState("menu");
-            return null;
+            return this.enterMenu(stillButtons, currentButton, clut);
           }
           // No buttons — skip the still
           if (ev.stillLength === 0xff) {
@@ -764,9 +776,7 @@ export class SessionManager {
             this.log(
               `Menu detected via HIGHLIGHT: ${hlButtons.length} buttons, current=${currentButton}, sector=${this.menuFirstSector}-${this.menuLastSector}`,
             );
-            this.setMenu(this.buildMenuState(hlButtons, currentButton, clut));
-            this.setState("menu");
-            return null;
+            return this.enterMenu(hlButtons, currentButton, clut);
           }
           continue;
         }
@@ -868,7 +878,7 @@ export class SessionManager {
       if (nextTarget) {
         this.playTarget(nextTarget);
       } else if (this._state === "menu") {
-        this.loadMenuVideo();
+        void this.loadMenuVideo();
       } else if (this._state !== "stopped") {
         this.setState("stopped");
       }

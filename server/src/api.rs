@@ -30,6 +30,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/disc/{slug}/vob/{filename}", get(vob_file))
         .route("/api/disc/{slug}/vob-range/{filename}", get(vob_range))
         .route("/api/disc/{slug}/vob-size/{filename}", get(vob_size))
+        .route("/api/disc/{slug}/menu-nav/{filename}", get(menu_nav))
         .route("/api/disc/{slug}/transcode-menu/{titleset}", get(transcode_menu))
         // TODO: /api/disc/{slug}/thumbnail — see GitHub issue for metadata/cover art
         .layer(CorsLayer::permissive())
@@ -261,6 +262,33 @@ async fn vob_size(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(serde_json::json!({ "size": size })))
+}
+
+/// Sparse NAV-pack stream for a menu VOB: `[u32 LE sector][2048-byte NAV pack]`
+/// repeated. Lets the client reconstruct navigation data without downloading
+/// the menu video (see Disc::read_menu_nav).
+async fn menu_nav(
+    State(state): State<AppState>,
+    Path((slug, filename)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let disc = require_access(&state, &slug, &headers)?;
+    disc.vob_file(&filename)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("VOB not found: {filename}")))?;
+
+    let fname = filename.clone();
+    let data = tokio::task::spawn_blocking(move || disc.read_menu_nav(&fname))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
+            (axum::http::header::CACHE_CONTROL, DISC_CACHE_CONTROL),
+        ],
+        data,
+    ))
 }
 
 #[derive(serde::Deserialize, Default)]
