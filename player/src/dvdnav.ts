@@ -389,10 +389,13 @@ async function loadDiscFiles(mod: DvdnavModule, slug: string): Promise<LoadState
       const vtsN = parseInt(m[1], 10);
       const ifoName = `VTS_${m[1]}_0.IFO`;
 
-      // Check VOB size via HEAD to decide full vs partial loading
-      const headResp = await discFetch(`/vob/${vobName}`, { method: "HEAD" });
-      if (!headResp.ok) return;
-      const totalSize = parseInt(headResp.headers.get("content-length") ?? "0", 10);
+      // Check VOB size via the cheap metadata endpoint to decide full vs
+      // partial loading. A HEAD on /vob would run the full read handler
+      // server-side (axum routes HEAD to the GET handler), reading — and on a
+      // CSS disc, decrypting — the entire VOB just to discard the body.
+      const sizeResp = await discFetch(`/vob-size/${vobName}`);
+      if (!sizeResp.ok) return;
+      const totalSize = ((await sizeResp.json()) as { size: number }).size ?? 0;
 
       if (totalSize > 1024 * 1024) {
         // Large VOB — try per-PGC partial loading

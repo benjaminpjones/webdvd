@@ -11,6 +11,11 @@ use tower_http::cors::CorsLayer;
 
 use crate::{AppState, auth, cache, disc::{Disc, Visibility}, transcode};
 
+/// Disc files (IFO/VOB sectors) are immutable for the life of a disc, so let
+/// the browser cache them indefinitely. `private` keeps shared proxies from
+/// serving cached bytes for access-gated discs to other users.
+const DISC_CACHE_CONTROL: &str = "private, max-age=31536000, immutable";
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/library", get(library_list))
@@ -167,7 +172,10 @@ async fn ifo_file(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok((
-        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+        [
+            (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
+            (axum::http::header::CACHE_CONTROL, DISC_CACHE_CONTROL),
+        ],
         bytes,
     ))
 }
@@ -197,7 +205,10 @@ async fn vob_file(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok((
-        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+        [
+            (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
+            (axum::http::header::CACHE_CONTROL, DISC_CACHE_CONTROL),
+        ],
         bytes,
     ))
 }
@@ -228,6 +239,7 @@ async fn vob_range(
 
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(axum::http::header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
+    headers.insert(axum::http::header::CACHE_CONTROL, DISC_CACHE_CONTROL.parse().unwrap());
     headers.insert("x-vob-total-size", total_size.to_string().parse().unwrap());
 
     Ok((headers, data))
