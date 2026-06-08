@@ -36,6 +36,26 @@ async function main() {
   console.log(`Loading WASM module...`);
   const Module = await createModule();
 
+  // On-demand VOB block reads: dvd_input.c is overridden so *.VOB reads call
+  // Module.onVobRead (via the dvdread_fetch_blocks async bridge) instead of
+  // reading MEMFS. The player serves these from server-extracted NAV packs; for
+  // this offline validation we serve the requested sector range straight from
+  // the real VOB file on disk. Returns up to `count` 2048-byte blocks (short at
+  // EOF), which is what the bridge expects.
+  const vobCache = new Map();
+  Module.onVobRead = (path, startBlock, count) => {
+    const name = path.slice(path.lastIndexOf("/") + 1);
+    let data = vobCache.get(name);
+    if (!data) {
+      data = readFileSync(join(videoTsDir, name));
+      vobCache.set(name, data);
+    }
+    const start = startBlock * 2048;
+    if (start >= data.length) return new Uint8Array(0);
+    const end = Math.min(start + count * 2048, data.length);
+    return new Uint8Array(data.subarray(start, end));
+  };
+
   // Write IFO/BUP files into MEMFS
   console.log(`Loading IFO files from ${videoTsDir}`);
   Module.FS.mkdir("/dvd");

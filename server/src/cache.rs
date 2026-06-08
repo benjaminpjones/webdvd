@@ -137,13 +137,12 @@ where
             tracing::debug!("HTTP client closed; continuing to populate cache");
         }
 
-        if file_ok {
-            if let Some(f) = file.as_mut() {
-                if let Err(e) = f.write_all(&chunk).await {
-                    tracing::warn!("Cache write error: {e}");
-                    file_ok = false;
-                }
-            }
+        if file_ok
+            && let Some(f) = file.as_mut()
+            && let Err(e) = f.write_all(&chunk).await
+        {
+            tracing::warn!("Cache write error: {e}");
+            file_ok = false;
         }
     }
 

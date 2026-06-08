@@ -30,6 +30,7 @@ pub struct TranscodeOpts {
 /// disc is CSS-encrypted and libdvdcss is installed on the host, libdvdread
 /// uses it to decrypt transparently. Already-decrypted (ripped) VIDEO_TS data
 /// passes through unchanged with no decryption involved.
+#[allow(clippy::too_many_arguments)]
 pub async fn transcode_to_stream(
     vob_files: &[&Path],
     opts: &TranscodeOpts,
