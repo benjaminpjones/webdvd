@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Petal Press 🌸 — collect, dry & craft</title>
+    <meta
+      name="description"
+      content="A cozy little game: collect petals from flowers, dry them on a board, and press them into pretty crafts."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌸</text></svg>"
+    />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>🌸 Petal Press</h1>
+      <div class="stats">
+        <span class="stat" title="Crafts completed">🎀 <b id="stat-crafts">0</b></span>
+        <span class="stat" title="Petals collected">🌼 <b id="stat-collected">0</b></span>
+        <span class="stat" title="Score">⭐ <b id="stat-score">0</b></span>
+      </div>
+      <button id="help-btn" class="ghost-btn" aria-label="How to play">How to play</button>
+    </header>
+
+    <main class="board">
+      <!-- 1. GARDEN -->
+      <section class="panel garden" aria-label="Garden">
+        <h2><span class="num">1</span> Garden</h2>
+        <p class="hint">Tap a flower in bloom to gather its petals.</p>
+        <div id="garden" class="garden-grid"></div>
+      </section>
+
+      <!-- 2. DRYING RACK -->
+      <section class="panel rack-panel" aria-label="Drying board">
+        <h2><span class="num">2</span> Drying Board</h2>
+        <p class="hint">
+          Tap a fresh petal to lay it on the board. It dries on its own.
+        </p>
+        <div class="tray">
+          <div class="tray-label">Fresh petals</div>
+          <div id="fresh" class="fresh-tray"></div>
+        </div>
+        <div id="rack" class="rack"></div>
+      </section>
+
+      <!-- 3. CRAFT -->
+      <section class="panel craft-panel" aria-label="Craft">
+        <h2><span class="num">3</span> Pressed Craft: <span id="craft-name">—</span></h2>
+        <p class="hint">
+          Tap a dried petal to press it into a matching spot. Fill them all!
+        </p>
+        <div class="tray dry-tray-wrap">
+          <div class="tray-label">Dried petals</div>
+          <div id="dry" class="dry-tray"></div>
+        </div>
+        <div id="craft" class="craft-grid"></div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <div id="help" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-card">
+        <h2>How to play 🌷</h2>
+        <ol>
+          <li><b>Collect:</b> tap a blooming flower to gather petals into the <i>Fresh</i> tray. Flowers re-bloom after a little while.</li>
+          <li><b>Dry:</b> tap a fresh petal to place it on the drying board. Wait for the ring to fill — then it's a <i>dried</i> petal.</li>
+          <li><b>Craft:</b> tap a dried petal to press it into a matching coloured spot on the pattern. Complete the picture to finish the craft and start a new one!</li>
+        </ol>
+        <p class="tip">Tip: each craft tells you which colours it needs. Plan your picking!</p>
+        <button id="help-close" class="primary-btn">Got it</button>
+      </div>
+    </div>
+
+    <script src="game.js"></script>
+  </body>
+</html>
