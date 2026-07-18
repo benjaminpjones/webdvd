@@ -185,7 +185,13 @@ fn build_ffmpeg_args(
         "-c:a".to_string(), "aac".to_string(),
         "-b:a".to_string(), "192k".to_string(),
         "-ac".to_string(), "2".to_string(),
-        "-movflags".to_string(), "+frag_keyframe+empty_moov".to_string(),
+        // `+default_base_moof` is REQUIRED for MediaSource: without it ffmpeg
+        // writes `base-data-offset` addressing in each `tfhd`, which MSE forbids
+        // (it demands movie-fragment-relative addressing). Chrome rejects the
+        // append with CHUNK_DEMUXER_ERROR_APPEND_FAILED; Safari/Firefox can't
+        // play it at all. See mse-byte-stream-format-isobmff §movie-fragment-
+        // relative-addressing.
+        "-movflags".to_string(), "+frag_keyframe+empty_moov+default_base_moof".to_string(),
         "-f".to_string(), "mp4".to_string(),
         "pipe:1".to_string(),
     ]);
@@ -529,6 +535,31 @@ mod tests {
             value_after("-level"),
             Some("4.0"),
             "H.264 level must be pinned to 4.0 for the MSE codec string avc1.640028"
+        );
+    }
+
+    /// MediaSource forbids `base-data-offset` addressing in fragment headers, so
+    /// the fMP4 must be written with `+default_base_moof`. Without it every
+    /// SourceBuffer append fails and playback silently degrades to native
+    /// <video> (which reintroduces the Safari/Firefox failure this all fixes).
+    #[test]
+    fn ffmpeg_args_use_movie_fragment_relative_addressing() {
+        let opts = TranscodeOpts::default();
+        let args = build_ffmpeg_args(&opts, /* use_stdin */ true, Path::new("/tmp/concat.txt"));
+
+        let movflags = args
+            .windows(2)
+            .find(|w| w[0] == "-movflags")
+            .map(|w| w[1].as_str())
+            .expect("ffmpeg args must set -movflags");
+
+        assert!(
+            movflags.contains("default_base_moof"),
+            "fMP4 must use +default_base_moof for MSE compatibility; got: {movflags}"
+        );
+        assert!(
+            movflags.contains("frag_keyframe") && movflags.contains("empty_moov"),
+            "fMP4 must stay fragmented + empty_moov for streaming start; got: {movflags}"
         );
     }
 
