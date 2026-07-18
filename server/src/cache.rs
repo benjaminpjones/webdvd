@@ -8,7 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// Cache directory schema version. Bump when ffmpeg codec settings change
 /// in a way that would alter output bytes — transparently invalidates the
 /// old cache.
-const SCHEMA_VERSION: &str = "v1";
+const SCHEMA_VERSION: &str = "v2";
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -354,7 +354,7 @@ mod tests {
         };
         assert_eq!(
             cache().final_path(&key),
-            PathBuf::from("/var/cache/webdvd/v1/THE_MATRIX/title_1_0_499999_-_-.mp4"),
+            PathBuf::from("/var/cache/webdvd/v2/THE_MATRIX/title_1_0_499999_-_-.mp4"),
         );
     }
 
@@ -371,7 +371,7 @@ mod tests {
         };
         assert_eq!(
             cache().seekable_path(&key),
-            PathBuf::from("/var/cache/webdvd/v1/THE_MATRIX/title_2_4262_2878796_-_-.seek.mp4"),
+            PathBuf::from("/var/cache/webdvd/v2/THE_MATRIX/title_2_4262_2878796_-_-.seek.mp4"),
         );
     }
 
@@ -388,7 +388,7 @@ mod tests {
         };
         assert_eq!(
             cache().final_path(&key),
-            PathBuf::from("/var/cache/webdvd/v1/THE_MATRIX/menu_0_-_-_-_-.mp4"),
+            PathBuf::from("/var/cache/webdvd/v2/THE_MATRIX/menu_0_-_-_-_-.mp4"),
         );
     }
 
@@ -405,7 +405,7 @@ mod tests {
         };
         assert_eq!(
             cache().final_path(&key),
-            PathBuf::from("/var/cache/webdvd/v1/SHREK/title_2_-_-_60000_30000.mp4"),
+            PathBuf::from("/var/cache/webdvd/v2/SHREK/title_2_-_-_60000_30000.mp4"),
         );
     }
 
