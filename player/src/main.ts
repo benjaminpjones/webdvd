@@ -385,6 +385,9 @@ async function openDisc(slug: string) {
     setupKeyboard(sm);
     setupOverlayMouse(overlay, menuOverlay, sm);
 
+    // Build time→sector maps (for full-movie seek bar + scrubbing) before
+    // playback; non-blocking failure just disables seek-by-re-transcode.
+    await sm.preloadTitleMaps();
     await sm.start();
   } catch (err) {
     console.error("[init] Failed:", err);

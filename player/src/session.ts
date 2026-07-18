@@ -25,6 +25,12 @@ import {
 import { demuxSubpictures } from "./spu-demux";
 import { decodeSpuPacket, type SpuImage } from "./spu-decode";
 import { MseSource, mseSupported } from "./mse";
+import {
+  parseTitlePgcs,
+  buildTimeSectorMap,
+  lookupCellForMs,
+  type TimeSectorEntry,
+} from "./ifo-parser";
 
 /** Read big-endian uint32 from a Uint8Array */
 function readU32(data: Uint8Array, offset: number): number {
@@ -71,6 +77,20 @@ export class SessionManager {
   private _menuState: MenuState | null = null;
   private mse: MseSource | null = null;
   private mseFellBack = false;
+  // Per-title time→sector maps, built once from the VTS IFO cell tables. Enable
+  // seeking anywhere on the bar by re-transcoding from the cell covering the
+  // target time. Keyed by `${vts}:${firstSector}:${lastSector}`.
+  private titleMaps = new Map<string, { map: TimeSectorEntry[]; durationSec: number }>();
+  private titleMapsLoaded = false;
+  // The currently playing title's map (looked up from titleMaps).
+  private titleTimeMap: TimeSectorEntry[] = [];
+  private titleDurationSec = 0;
+  private titleVts = 0;
+  private titleLastSector = 0;
+  // Movie-time we last moved the playhead to ourselves; the seek handler
+  // ignores seeks near this value so our own repositioning doesn't re-trigger.
+  private programmaticSeekSec: number | null = null;
+  private seekDebounce: ReturnType<typeof setTimeout> | null = null;
   private onStateChange: ((state: SessionState) => void) | null = null;
   private onMenuChange: ((menu: MenuState | null) => void) | null = null;
   private onLog: ((msg: string) => void) | null = null;
@@ -92,6 +112,36 @@ export class SessionManager {
     this.onStateChange = opts?.onStateChange ?? null;
     this.onMenuChange = opts?.onMenuChange ?? null;
     this.onLog = opts?.onLog ?? null;
+
+    // Scrubbing the seek bar: if the target is already buffered, the browser
+    // seeks natively; if not, re-transcode from the cell covering that time.
+    this.video.addEventListener("seeking", this.onVideoSeeking);
+  }
+
+  private onVideoSeeking = () => {
+    if (this._state !== "playing") return;
+    const t = this.video.currentTime;
+    // Ignore our own repositioning (segment start / seek resume).
+    if (this.programmaticSeekSec !== null && Math.abs(t - this.programmaticSeekSec) < 0.75) {
+      this.programmaticSeekSec = null;
+      return;
+    }
+    // Within buffered data → let the browser seek natively (smooth, no reload).
+    if (this.isBuffered(t)) return;
+    // Otherwise coalesce rapid drag events, then re-transcode from the target.
+    if (this.seekDebounce) clearTimeout(this.seekDebounce);
+    this.seekDebounce = setTimeout(() => {
+      this.seekDebounce = null;
+      this.seekTo(this.video.currentTime);
+    }, 250);
+  };
+
+  private isBuffered(t: number): boolean {
+    const { buffered } = this.video;
+    for (let i = 0; i < buffered.length; i++) {
+      if (t >= buffered.start(i) && t <= buffered.end(i)) return true;
+    }
+    return false;
   }
 
   get state(): SessionState {
@@ -415,7 +465,14 @@ export class SessionManager {
    */
   private attachSource(
     url: string,
-    opts: { durationHintSec?: number; keepAll?: boolean } = {},
+    opts: {
+      durationHintSec?: number;
+      totalDurationSec?: number;
+      timestampOffsetSec?: number;
+      startAtSec?: number;
+      onProgrammaticSeek?: (sec: number) => void;
+      keepAll?: boolean;
+    } = {},
   ): void {
     this.detachSource();
     this.mseFellBack = false;
@@ -425,6 +482,10 @@ export class SessionManager {
       try {
         this.mse = new MseSource(this.video, url, {
           durationHintSec: opts.durationHintSec,
+          totalDurationSec: opts.totalDurationSec,
+          timestampOffsetSec: opts.timestampOffsetSec,
+          startAtSec: opts.startAtSec,
+          onProgrammaticSeek: opts.onProgrammaticSeek,
           keepAll: opts.keepAll,
           onLog: (m) => this.log(m),
           onError: (err) => {
@@ -888,6 +949,98 @@ export class SessionManager {
     return null;
   }
 
+  /**
+   * Build time→sector maps for every title from the VTS IFOs. Run once at disc
+   * open (before playback) so `playTarget` can look a map up synchronously.
+   * Each map (cumulative cell start-time → start sector) powers the full-movie
+   * seek bar and seek-anywhere. Failures are non-fatal: a title without a map
+   * just falls back to the old segment-relative seek bar.
+   */
+  async preloadTitleMaps(): Promise<void> {
+    if (this.titleMapsLoaded) return;
+    this.titleMapsLoaded = true;
+
+    // One IFO per titleset; parse it once and match each title to its PGC.
+    const vtsSet = new Set(this.structure.titles.map((t) => t.vts).filter((v) => v > 0));
+    await Promise.all(
+      [...vtsSet].map(async (vts) => {
+        try {
+          const fname = `VTS_${String(vts).padStart(2, "0")}_0.IFO`;
+          const res = await fetch(`${this.apiBase}/ifo/${fname}`);
+          if (!res.ok) throw new Error(`ifo fetch ${res.status}`);
+          const pgcs = parseTitlePgcs(await res.arrayBuffer());
+          for (const title of this.structure.titles.filter((t) => t.vts === vts)) {
+            const pgc =
+              pgcs.find(
+                (p) => p.firstSector === title.firstSector && p.lastSector === title.lastSector,
+              ) ?? pgcs.find((p) => p.firstSector === title.firstSector);
+            if (pgc && pgc.cells.length > 0) {
+              const key = `${vts}:${title.firstSector}:${title.lastSector}`;
+              this.titleMaps.set(key, {
+                map: buildTimeSectorMap(pgc.cells),
+                durationSec: pgc.durationMs / 1000,
+              });
+            }
+          }
+        } catch (err) {
+          this.log(`Title map load failed for VTS ${vts}: ${String(err)}`);
+        }
+      }),
+    );
+    this.log(`Preloaded ${this.titleMaps.size} title map(s)`);
+  }
+
+  /** Point the current-title map fields at the cached map for this title. */
+  private useTitleMap(vts: number, firstSector: number, lastSector: number): void {
+    const entry = this.titleMaps.get(`${vts}:${firstSector}:${lastSector}`);
+    if (entry) {
+      this.titleTimeMap = entry.map;
+      this.titleDurationSec = entry.durationSec;
+    } else {
+      this.titleTimeMap = [];
+      this.titleDurationSec = 0;
+    }
+  }
+
+  /** Movie-time (seconds) at which the cell starting at `sector` begins. */
+  private segmentStartSec(sector?: number): number {
+    if (!sector || sector <= 0 || this.titleTimeMap.length === 0) return 0;
+    const entry = this.titleTimeMap.find((e) => e.firstSector === sector);
+    return entry ? entry.startMs / 1000 : 0;
+  }
+
+  /**
+   * Seek to `targetSec` in the current title by re-transcoding from the cell
+   * that covers it (the nearest cell boundary at or before the target), then
+   * resuming playback exactly at `targetSec`. Used for scrubs that land outside
+   * the buffered window.
+   */
+  private seekTo(targetSec: number): void {
+    if (this._state !== "playing" || this.titleTimeMap.length === 0) return;
+    const cell = lookupCellForMs(this.titleTimeMap, targetSec * 1000);
+    if (!cell) return;
+    // Playback resumes at the cell boundary (at or just before the target) —
+    // instant, since the transcode starts there. Fine-tuning inside the target
+    // region is then a smooth native seek within the buffer.
+    this.log(
+      `Seek ${targetSec.toFixed(1)}s → cell sector ${cell.firstSector} ` +
+        `(cell start ${(cell.startMs / 1000).toFixed(1)}s)`,
+    );
+    this.playTarget({
+      vts: this.titleVts,
+      title: this.currentTitle,
+      part: this.currentPart,
+      sector: cell.firstSector,
+      lastSector: this.titleLastSector,
+    });
+  }
+
+  /**
+   * Start (or re-point) title playback. The transcode covers [sector → title
+   * end]; when a time→sector map is available we place it on the full-title
+   * timeline via `timestampOffsetSec` and set the bar to the whole title, so a
+   * mid-movie start shows the playhead in the right place.
+   */
   private playTarget(target: PlaybackTarget): void {
     this.currentTitle = target.title;
     this.currentPart = target.part;
@@ -897,6 +1050,16 @@ export class SessionManager {
       `Playing VTS ${vts} (title ${target.title}, chapter ${target.part}, sector=${target.sector ?? 0}, lastSector=${target.lastSector ?? 0})`,
     );
     this.setState("loading");
+
+    const titleInfo = this.structure.titles.find((t) => t.title === target.title);
+    if (titleInfo) {
+      this.useTitleMap(vts, titleInfo.firstSector, titleInfo.lastSector);
+    } else {
+      this.titleTimeMap = [];
+      this.titleDurationSec = 0;
+    }
+    this.titleVts = vts;
+    this.titleLastSector = target.lastSector ?? titleInfo?.lastSector ?? 0;
 
     let url = `${this.apiBase}/transcode/${vts}`;
     const params = new URLSearchParams();
@@ -909,20 +1072,31 @@ export class SessionManager {
     const qs = params.toString();
     if (qs) url += `?${qs}`;
 
-    // Duration hint for the seek bar. The transcode runs from this cell to the
-    // end of the title's PGC, so subtract the chapter's start time from the
-    // title's total. endOfStream() later corrects any drift. A rough estimate
-    // is fine — it just needs the bar to show full length before full buffer.
-    const titleInfo = this.structure.titles.find((t) => t.title === target.title);
+    // Where this segment sits on the full-movie timeline. Playback also resumes
+    // here (the transcode starts at this cell, so it's instantly available).
+    const segStartSec = this.segmentStartSec(target.sector);
+
+    // With a title map, the bar spans the whole movie (totalDurationSec) and the
+    // segment is offset into it. Without one, fall back to a rough estimate of
+    // the remaining runtime so the bar at least has a length.
+    const totalDurationSec = this.titleDurationSec > 0 ? this.titleDurationSec : undefined;
     let durationHintSec: number | undefined;
-    if (titleInfo && titleInfo.durationMs > 0) {
+    if (!totalDurationSec && titleInfo && titleInfo.durationMs > 0) {
       const chapterStartMs = target.part > 1 ? (titleInfo.chapterTimesMs[target.part - 2] ?? 0) : 0;
       durationHintSec = Math.max(0, (titleInfo.durationMs - chapterStartMs) / 1000);
     }
 
     this.video.muted = false; // unmute for title playback
     this.video.loop = false; // titles don't loop — onended resumes VM
-    this.attachSource(url, { durationHintSec });
+    this.attachSource(url, {
+      durationHintSec,
+      totalDurationSec,
+      timestampOffsetSec: segStartSec,
+      startAtSec: segStartSec,
+      onProgrammaticSeek: (sec) => {
+        this.programmaticSeekSec = sec;
+      },
+    });
 
     const onCanPlay = () => {
       this.video.removeEventListener("canplay", onCanPlay);

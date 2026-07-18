@@ -73,6 +73,26 @@ export interface MseOptions {
   /** Best-estimate media duration in seconds, shown on the seek bar up front. */
   durationHintSec?: number;
   /**
+   * Full-movie duration in seconds. When set (with `timestampOffsetSec`), the
+   * seek bar spans the whole title even though this segment is only part of it,
+   * so scene playback shows the playhead at its true position. Overrides
+   * `durationHintSec` for the initial duration.
+   */
+  totalDurationSec?: number;
+  /**
+   * Movie-time (seconds) at which this segment's media begins. Applied as the
+   * SourceBuffer `timestampOffset` so a segment transcoded from mid-movie is
+   * placed at the right spot on the full-title timeline.
+   */
+  timestampOffsetSec?: number;
+  /**
+   * Movie-time (seconds) to start playback at once the first data is buffered.
+   * Used to resume at a seek target that sits inside this segment.
+   */
+  startAtSec?: number;
+  /** Called when this instance programmatically moves the playhead (seek). */
+  onProgrammaticSeek?: (sec: number) => void;
+  /**
    * Keep the entire stream buffered (no ahead-cap, no eviction). Used for
    * menus, which are short and loop over their whole range.
    */
@@ -102,6 +122,7 @@ export class MseSource {
   private destroyed = false;
   // ManagedMediaSource append gating. Plain MediaSource stays true throughout.
   private streaming = true;
+  private startApplied = false;
   private wakeResolvers: Array<() => void> = [];
 
   constructor(video: HTMLVideoElement, url: string, opts: MseOptions) {
@@ -195,11 +216,23 @@ export class MseSource {
       this.sb = sb;
       sb.addEventListener("updateend", this.onWake);
 
-      if (this.opts.durationHintSec && this.opts.durationHintSec > 0) {
-        // Best-estimate duration so the seek bar shows full length right away.
-        // endOfStream() later snaps it to the true buffered length.
+      // Place this segment on the full-title timeline. ffmpeg normalizes each
+      // transcode to start at media-time 0, so shifting by the segment's
+      // movie-time start puts it in the right spot on the seek bar.
+      if (this.opts.timestampOffsetSec && this.opts.timestampOffsetSec > 0) {
         try {
-          this.ms.duration = this.opts.durationHintSec;
+          sb.timestampOffset = this.opts.timestampOffsetSec;
+        } catch {
+          /* offset unsupported — segment plays from 0 */
+        }
+      }
+
+      // Prefer the full-movie duration (so the bar spans the whole title even
+      // for a mid-movie segment); fall back to the segment estimate.
+      const initialDuration = this.opts.totalDurationSec ?? this.opts.durationHintSec;
+      if (initialDuration && initialDuration > 0) {
+        try {
+          this.ms.duration = initialDuration;
         } catch {
           /* duration is refined on endOfStream */
         }
@@ -207,11 +240,34 @@ export class MseSource {
 
       // Feed the bytes we buffered while sniffing, then stream the rest.
       await this.append(concat(prefix, prefixLen));
+
+      // Resume at the seek target now that the segment's first data is buffered.
+      this.applyStartAt();
+
       await this.pump(reader);
     } catch (err) {
       if (this.destroyed || this.ac.signal.aborted) return;
       this.log(`MSE error: ${String(err)}`);
       this.opts.onError?.(err);
+    }
+  }
+
+  /**
+   * Move the playhead to the seek target once the segment's first data is in.
+   * Runs once. Announces the move via onProgrammaticSeek so the session's seek
+   * handler doesn't mistake it for a user scrub and re-transcode in a loop.
+   */
+  private applyStartAt() {
+    if (this.startApplied) return;
+    const t = this.opts.startAtSec;
+    if (t === undefined || t < 0) return;
+    this.startApplied = true;
+    if (Math.abs(this.video.currentTime - t) < 0.25) return; // already there
+    try {
+      this.opts.onProgrammaticSeek?.(t);
+      this.video.currentTime = t;
+    } catch {
+      /* seeking not possible yet — playback still starts at the segment head */
     }
   }
 

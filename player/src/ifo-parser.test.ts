@@ -1,11 +1,99 @@
 import { describe, test, expect } from "vitest";
 import {
   parseMenuPgcs,
+  parseTitlePgcs,
+  buildTimeSectorMap,
+  lookupCellForMs,
   mergeRanges,
   isSectorRangeLoaded,
   ENTRY_ID_ROOT_MENU,
   type CellRange,
 } from "./ifo-parser";
+
+describe("buildTimeSectorMap", () => {
+  const cells: CellRange[] = [
+    { firstSector: 100, lastSector: 199, durationMs: 60_000 },
+    { firstSector: 200, lastSector: 299, durationMs: 30_000 },
+    { firstSector: 300, lastSector: 399, durationMs: 90_000 },
+  ];
+
+  test("accumulates cell start times into a timeline", () => {
+    expect(buildTimeSectorMap(cells)).toEqual([
+      { startMs: 0, endMs: 60_000, firstSector: 100 },
+      { startMs: 60_000, endMs: 90_000, firstSector: 200 },
+      { startMs: 90_000, endMs: 180_000, firstSector: 300 },
+    ]);
+  });
+
+  test("empty cells → empty map", () => {
+    expect(buildTimeSectorMap([])).toEqual([]);
+  });
+});
+
+describe("lookupCellForMs", () => {
+  const map = buildTimeSectorMap([
+    { firstSector: 100, lastSector: 199, durationMs: 60_000 },
+    { firstSector: 200, lastSector: 299, durationMs: 30_000 },
+    { firstSector: 300, lastSector: 399, durationMs: 90_000 },
+  ]);
+
+  test("finds the cell covering a time (snaps to cell start)", () => {
+    expect(lookupCellForMs(map, 75_000)?.firstSector).toBe(200); // in 2nd cell
+    expect(lookupCellForMs(map, 60_000)?.firstSector).toBe(200); // boundary → next cell
+    expect(lookupCellForMs(map, 10_000)?.firstSector).toBe(100);
+    expect(lookupCellForMs(map, 120_000)?.firstSector).toBe(300);
+  });
+
+  test("clamps below zero to the first cell and past the end to the last", () => {
+    expect(lookupCellForMs(map, -5)?.firstSector).toBe(100);
+    expect(lookupCellForMs(map, 999_999)?.firstSector).toBe(300);
+  });
+
+  test("empty map → null", () => {
+    expect(lookupCellForMs([], 1000)).toBeNull();
+  });
+});
+
+describe("parseTitlePgcs", () => {
+  // Craft a minimal VTS IFO: VTS_PGCIT pointer at 0xCC → sector 1, one PGC with
+  // two cells. Mirrors the real byte layout the parser walks.
+  function buildTitleIfo(): ArrayBuffer {
+    const buf = new ArrayBuffer(4096);
+    const view = new DataView(buf);
+    view.setUint32(204, 1, false); // VTS_PGCIT at sector 1 (byte 2048)
+    const base = 2048;
+    view.setUint16(base, 1, false); // nr_of_srp = 1
+    const pgcStart = 16;
+    view.setUint32(base + 8 + 4, pgcStart, false); // srp[0].pgc_start_byte
+    const pgc = base + pgcStart;
+    view.setUint8(pgc + 3, 2); // nr_of_cells = 2
+    const cellPb = 236;
+    view.setUint16(pgc + 232, cellPb, false); // cell_playback offset
+    const writeCell = (i: number, durBytes: number[], first: number, last: number) => {
+      const o = pgc + cellPb + i * 24;
+      durBytes.forEach((b, k) => view.setUint8(o + 4 + k, b));
+      view.setUint32(o + 8, first, false);
+      view.setUint32(o + 20, last, false);
+    };
+    // 1 min (m=0x01) @ 30fps rate flag (0xC0), then 30s
+    writeCell(0, [0x00, 0x01, 0x00, 0xc0], 500, 1499);
+    writeCell(1, [0x00, 0x00, 0x30, 0xc0], 1500, 2999);
+    return buf;
+  }
+
+  test("parses title PGC cells and durations", () => {
+    const pgcs = parseTitlePgcs(buildTitleIfo());
+    expect(pgcs).toHaveLength(1);
+    expect(pgcs[0].firstSector).toBe(500);
+    expect(pgcs[0].lastSector).toBe(2999);
+    expect(pgcs[0].cells).toHaveLength(2);
+    expect(pgcs[0].durationMs).toBe(90_000); // 60s + 30s
+  });
+
+  test("returns empty for a buffer with no VTS_PGCIT pointer", () => {
+    expect(parseTitlePgcs(new ArrayBuffer(512))).toEqual([]);
+  });
+});
 
 describe("mergeRanges", () => {
   test("returns empty for empty input", () => {
