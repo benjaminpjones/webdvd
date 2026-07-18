@@ -100,8 +100,9 @@ test.describe("DVD menu navigation", () => {
     await expect(status).toContainText("Playing", { timeout: 30_000 });
 
     const video = page.locator("#video");
-    const src = await video.getAttribute("src");
-    expect(src).toContain("/transcode/");
+    expect(await video.getAttribute("data-transcode-url")).toContain("/transcode/");
+    // MediaSource active (blob: src), not the native fallback.
+    expect(await video.getAttribute("src")).toMatch(/^blob:/);
   });
 
   test("sub-menu navigation and return to main", async ({ page }) => {
@@ -187,11 +188,19 @@ test.describe("DVD menu navigation", () => {
       readyState: v.readyState,
       error: v.error?.message ?? null,
       duration: v.duration,
+      srcIsBlob: (v.getAttribute("src") ?? "").startsWith("blob:"),
     }));
     expect(state.error).toBeNull();
     expect(state.paused).toBe(false);
     expect(state.readyState).toBeGreaterThanOrEqual(2);
     expect(state.duration).toBeGreaterThan(0);
+    // Playback must run through MediaSource, not the native <video> fallback.
+    // A blob: src means MSE is the active source; a plain /transcode/ URL would
+    // mean appendBuffer failed and we silently fell back — which passes the
+    // readyState/duration checks on Chromium but is broken on Safari/Firefox.
+    // This is the assertion that catches codec-string or fragment-addressing
+    // (e.g. +default_base_moof) regressions the fallback would otherwise hide.
+    expect(state.srcIsBlob).toBe(true);
   });
 
   test("multi-PGC title passes sector bounds to server", async ({ page }) => {
@@ -227,15 +236,20 @@ test.describe("DVD menu navigation", () => {
     expect(playLog).toBeTruthy();
     expect(playLog).toContain("lastSector=");
 
-    // Video should play without errors
+    // Video should play without errors, through MediaSource (blob: src), not
+    // the native fallback.
     const state = await video.evaluate((v: HTMLVideoElement) => ({
       error: v.error?.message ?? null,
       paused: v.paused,
       readyState: v.readyState,
+      srcIsBlob: (v.getAttribute("src") ?? "").startsWith("blob:"),
     }));
     expect(state.error).toBeNull();
     expect(state.paused).toBe(false);
     expect(state.readyState).toBeGreaterThanOrEqual(2);
+    expect(state.srcIsBlob).toBe(true);
+    // No MSE append/setup error should have forced a fallback.
+    expect(logs.find((l) => /MSE (error|failed)/.test(l))).toBeUndefined();
   });
 
   test("menu renders subpicture overlay on canvas", async ({ page }) => {
