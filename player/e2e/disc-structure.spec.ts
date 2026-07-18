@@ -160,7 +160,9 @@ test.describe("DVD menu navigation", () => {
     await expect(status).toContainText("Playing", { timeout: 30_000 });
 
     const video = page.locator("#video");
-    const src = await video.getAttribute("src");
+    // Playback runs through MediaSource, so the element's `src` is a blob: URL;
+    // the logical transcode URL is recorded on data-transcode-url.
+    const src = await video.getAttribute("data-transcode-url");
     expect(src).toContain("/transcode/");
   });
 
@@ -177,7 +179,7 @@ test.describe("DVD menu navigation", () => {
     await expect(status).toContainText("Playing title 4", { timeout: 30_000 });
 
     const video = page.locator("#video");
-    const src = await video.getAttribute("src");
+    const src = await video.getAttribute("data-transcode-url");
     expect(src).toContain("/transcode/3");
 
     const state = await video.evaluate((v: HTMLVideoElement) => ({
@@ -208,7 +210,7 @@ test.describe("DVD menu navigation", () => {
     await expect(status).toContainText("Playing title 3", { timeout: 30_000 });
 
     const video = page.locator("#video");
-    const src = await video.getAttribute("src");
+    const src = await video.getAttribute("data-transcode-url");
     // Should transcode VTS 2 with both sector and lastSector params
     expect(src).toContain("/transcode/2");
     expect(src).toMatch(/sector=\d+/);

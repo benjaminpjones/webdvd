@@ -170,6 +170,13 @@ fn build_ffmpeg_args(
     args.extend(["-map".to_string(), "i:0x80?".to_string()]);
 
     args.extend(["-c:v".to_string(), "libx264".to_string()]);
+    // Pin H.264 profile/level so the emitted codec string is deterministic
+    // (High@4.0 → avc1.640028). The player feeds this stream through
+    // MediaSource Extensions and must declare an exact codec string —
+    // Safari's SourceBuffer rejects a MIME type that doesn't match the
+    // actual bitstream. High@4.0 comfortably covers all DVD resolutions.
+    args.extend(["-profile:v".to_string(), "high".to_string()]);
+    args.extend(["-level".to_string(), "4.0".to_string()]);
     args.extend(["-vf".to_string(), "yadif".to_string()]);
 
     args.extend([
@@ -495,6 +502,33 @@ mod tests {
         assert!(
             maps.contains(&"0:v:0"),
             "video stream must be explicitly mapped; got maps: {maps:?}"
+        );
+    }
+
+    /// The player declares an exact MSE codec string (`avc1.640028`) that only
+    /// holds if ffmpeg pins the H.264 profile to High and the level to 4.0.
+    /// Safari's SourceBuffer rejects a codec-string mismatch, so this pairing
+    /// must not drift.
+    #[test]
+    fn ffmpeg_args_pin_h264_profile_and_level() {
+        let opts = TranscodeOpts::default();
+        let args = build_ffmpeg_args(&opts, /* use_stdin */ true, Path::new("/tmp/concat.txt"));
+
+        let value_after = |flag: &str| -> Option<&str> {
+            args.windows(2)
+                .find(|w| w[0] == flag)
+                .map(|w| w[1].as_str())
+        };
+
+        assert_eq!(
+            value_after("-profile:v"),
+            Some("high"),
+            "H.264 profile must be pinned to High for the MSE codec string avc1.640028"
+        );
+        assert_eq!(
+            value_after("-level"),
+            Some("4.0"),
+            "H.264 level must be pinned to 4.0 for the MSE codec string avc1.640028"
         );
     }
 

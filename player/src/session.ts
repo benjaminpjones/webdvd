@@ -24,6 +24,7 @@ import {
 } from "./dvdnav";
 import { demuxSubpictures } from "./spu-demux";
 import { decodeSpuPacket, type SpuImage } from "./spu-decode";
+import { MseSource, mseSupported } from "./mse";
 
 /** Read big-endian uint32 from a Uint8Array */
 function readU32(data: Uint8Array, offset: number): number {
@@ -68,6 +69,8 @@ export class SessionManager {
   private menuButtonSector = 0; // VOB-absolute sector where buttons appear (interactive portion)
   private _state: SessionState = "idle";
   private _menuState: MenuState | null = null;
+  private mse: MseSource | null = null;
+  private mseFellBack = false;
   private onStateChange: ((state: SessionState) => void) | null = null;
   private onMenuChange: ((menu: MenuState | null) => void) | null = null;
   private onLog: ((msg: string) => void) | null = null;
@@ -341,7 +344,9 @@ export class SessionManager {
   async returnToMenu(): Promise<void> {
     this.log("Returning to root menu...");
     this.video.pause();
+    this.detachSource();
     this.video.removeAttribute("src");
+    this.video.removeAttribute("data-transcode-url");
 
     // Reset VM and drive First Play to initialize the disc structure.
     // acceptTitles=false so we don't accept a title cell as a playback
@@ -397,6 +402,60 @@ export class SessionManager {
   }
 
   /**
+   * Point the <video> at a transcode URL.
+   *
+   * The server streams a live fragmented MP4 whose `moov` declares duration 0,
+   * which breaks Safari playback and leaves the seek bar short on Chrome/FF
+   * until fully buffered. We route playback through MediaSource so we can set
+   * the real duration (from the IFO) up front. `data-transcode-url` records the
+   * logical URL (the element's own `src` becomes an opaque blob: URL under MSE).
+   *
+   * Falls back to a native `<video src>` when MSE is unavailable or fails
+   * before playback has started.
+   */
+  private attachSource(
+    url: string,
+    opts: { durationHintSec?: number; keepAll?: boolean } = {},
+  ): void {
+    this.detachSource();
+    this.mseFellBack = false;
+    this.video.setAttribute("data-transcode-url", url);
+
+    if (mseSupported()) {
+      try {
+        this.mse = new MseSource(this.video, url, {
+          durationHintSec: opts.durationHintSec,
+          keepAll: opts.keepAll,
+          onLog: (m) => this.log(m),
+          onError: (err) => {
+            // Only fall back if playback never started — otherwise a late
+            // streaming hiccup would needlessly restart a playing video.
+            if (this.mseFellBack || this.video.readyState >= 2) return;
+            this.mseFellBack = true;
+            this.log(`MSE failed before playback (${String(err)}) — using native src`);
+            this.detachSource();
+            this.video.src = url;
+            this.video.load();
+          },
+        });
+        return;
+      } catch (err) {
+        this.log(`MSE unavailable (${String(err)}) — using native src`);
+      }
+    }
+
+    this.video.src = url;
+    this.video.load();
+  }
+
+  private detachSource(): void {
+    if (this.mse) {
+      this.mse.destroy();
+      this.mse = null;
+    }
+  }
+
+  /**
    * Load the menu background video. Plays the full sector range (intro +
    * interactive) as a single transcoded video. If there's an intro animation
    * (menuButtonSector > menuFirstSector), the overlay is hidden until the
@@ -416,10 +475,10 @@ export class SessionManager {
     this.log(
       `Loading menu video (VTS ${this.currentVts}, sector=${this.menuFirstSector}-${this.menuLastSector})...`,
     );
-    this.video.src = url;
     this.video.muted = false;
     this.video.loop = false;
-    this.video.load();
+    // Menus are short and loop over their whole range, so buffer everything.
+    this.attachSource(url, { keepAll: true });
 
     // Scan NAV packs in the VOB to find when buttons first appear.
     // This reads the actual PCI highlight data from the disc, matching
@@ -849,10 +908,21 @@ export class SessionManager {
     }
     const qs = params.toString();
     if (qs) url += `?${qs}`;
-    this.video.src = url;
+
+    // Duration hint for the seek bar. The transcode runs from this cell to the
+    // end of the title's PGC, so subtract the chapter's start time from the
+    // title's total. endOfStream() later corrects any drift. A rough estimate
+    // is fine — it just needs the bar to show full length before full buffer.
+    const titleInfo = this.structure.titles.find((t) => t.title === target.title);
+    let durationHintSec: number | undefined;
+    if (titleInfo && titleInfo.durationMs > 0) {
+      const chapterStartMs = target.part > 1 ? (titleInfo.chapterTimesMs[target.part - 2] ?? 0) : 0;
+      durationHintSec = Math.max(0, (titleInfo.durationMs - chapterStartMs) / 1000);
+    }
+
     this.video.muted = false; // unmute for title playback
     this.video.loop = false; // titles don't loop — onended resumes VM
-    this.video.load();
+    this.attachSource(url, { durationHintSec });
 
     const onCanPlay = () => {
       this.video.removeEventListener("canplay", onCanPlay);

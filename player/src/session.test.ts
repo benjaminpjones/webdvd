@@ -163,6 +163,7 @@ function createMockVideo() {
     play: vi.fn(async () => {}),
     pause: vi.fn(),
     load: vi.fn(),
+    setAttribute: vi.fn(),
     removeAttribute: vi.fn(),
     addEventListener: vi.fn((event: string, fn: (...args: unknown[]) => void) => {
       (listeners[event] ??= []).push(fn);
