@@ -80,7 +80,7 @@ builds are incremental (~20s).
 
 ```bash
 # From your laptop, per disc:
-rsync -av ~/Movies/DVD/SHREK/ root@<vps-ip>:/data/discs/SHREK/
+rsync -av /path/to/discs/SHREK/ root@<vps-ip>:/data/discs/SHREK/
 ```
 
 After upload, `chown -R webdvd:webdvd /data/discs/<DiscName>` on the VPS
