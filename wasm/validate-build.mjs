@@ -104,7 +104,7 @@ async function main() {
   // Test structure queries
   console.log("\nDisc structure:");
   const numTitles = dvd.getNumTitles();
-  assert(numTitles === 4, `has 4 titles (got ${numTitles})`);
+  assert(numTitles === 6, `has 6 titles (got ${numTitles})`);
 
   const numParts1 = dvd.getNumParts(1);
   assert(numParts1 === 2, `title 1 has 2 chapters (got ${numParts1})`);
@@ -172,7 +172,9 @@ async function main() {
   const rc2 = dvd.open("/dvd2/VIDEO_TS");
   assert(rc2 === 0, `dvd_open (re-open with VOBs) returns 0 (got ${rc2})`);
 
-  const getNextEvent = Module.cwrap("dvd_get_next_event", "string", []);
+  // Asyncify: dvd_get_next_event can suspend (on-demand VOB reads), so it
+  // returns a Promise. Mirrors the cwrap in player/src/dvdnav.ts.
+  const getNextEvent = Module.cwrap("dvd_get_next_event", "string", [], { async: true });
   const stillSkip = Module.cwrap("dvd_still_skip", "number", []);
 
   // After open, the VM is at First Play PGC which jumps to the root menu.
@@ -180,7 +182,7 @@ async function main() {
   const getButtons = Module.cwrap("dvd_get_buttons", "string", []);
   let foundMenu = false;
   for (let i = 0; i < 20; i++) {
-    const json = getNextEvent();
+    const json = await getNextEvent();
     const ev = JSON.parse(json);
 
     // After any event, check if PCI has been populated with buttons
@@ -188,7 +190,7 @@ async function main() {
       const btns = JSON.parse(getButtons());
       if (btns.length > 0) {
         foundMenu = true;
-        assert(btns.length === 5, `root menu has 5 buttons (got ${btns.length})`);
+        assert(btns.length === 7, `root menu has 7 buttons (got ${btns.length})`);
         break;
       }
     }
