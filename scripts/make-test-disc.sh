@@ -5,18 +5,22 @@ set -euo pipefail
 # Requires: ffmpeg (with drawtext/freetype), dvdauthor, spumux
 #
 # The test disc has:
-#   - Root menu (VMGM PGC 1) with 6 buttons: "Title 1", "Title 2", "Title 3", "Title 4", "Chapters", "Bonus"
+#   - Root menu (VMGM PGC 1) with 7 buttons: "Title 1", "Title 2", "Title 3", "Title 4", "Chapters", "Bonus", "Play via Stub"
 #   - Bonus menu (VMGM PGC 2) with 2 buttons: "Play Title 1", "Main Menu"
 #     (direct VMGM→VMGM transition with different button count — tests
 #      that PCI button data is primed before JS sees the menu)
 #   - VTS 1 menu intro (4s purple animation, non-root PGC — tests partial VOB loading + overlay timing)
 #   - Chapters sub-menu (VTS 1 menu) with 3 buttons: "Chapter 1", "Chapter 2", "Main Menu"
-#   - 4 titles across 3 titlesets
+#   - 6 titles across 4 titlesets
 #   - Title 1 (VTS 1, PGC 1): 8s, blue-shifted test pattern, 2 chapters (4s each)
 #   - Title 2 (VTS 2, PGC 1): 10s, green-shifted test pattern, 3 chapters (~3.3s each)
 #   - Title 3 (VTS 2, PGC 2): 4s, yellow-shifted test pattern, 1 chapter
 #     (second PGC in same titleset as Title 2 — tests PGC sector bounds)
 #   - Title 4 (VTS 3, PGC 1): 6s, red-shifted test pattern, 1 chapter
+#   - Title 5 (VTS 4, PGC 1): 0.5s dispatcher stub — post-command jumps to
+#     VMGM PGC 3 (a command-only dispatcher) which jumps to Title 6
+#   - Title 6 (VTS 4, PGC 2): 5s, magenta test pattern — the stub's real
+#     destination, reachable only by following the post-command chain
 #   - First Play PGC goes to VMGM root menu
 #   - VTS 1 menu entry plays intro PGC, then chains to chapters sub-menu
 #   - Title post-commands return to root menu
@@ -119,10 +123,42 @@ drawtext=${DT_BUG}:text='BUG if video does not start after menu button press':x=
     -c:a ac3 -b:a 192k \
     "$WORK_DIR/title4.mpg"
 
+# Dispatcher stub: 0.5s, deliberately tiny — no real content.
+# Tests: a menu button that jumps to a "jump pad" PGC whose POST-commands
+# select the real destination, rather than to the feature directly. This is
+# how Shrek's Play button works (VTS 5 PGC 2: 500ms, 38 sectors, post =
+# JumpSS VMGM PGC 3 → a command-only dispatcher ending in JumpTT 10).
+# Playing this stub instead of following its post-commands is the bug.
+# Must stay under STUB_MAX_MS (1000) and STUB_MAX_SECTORS (512) in
+# player/src/dvdnav.ts or the player will not recognise it as a stub.
+$FFMPEG -y -loglevel error \
+    -f lavfi -i "color=c=black:s=720x480:r=29.97:d=0.5,\
+drawtext=${DT_HEADER}:text='STUB — you should not see this':x=(w-tw)/2:y=220" \
+    -f lavfi -i "sine=frequency=110:duration=0.5" \
+    -target ntsc-dvd \
+    -c:a ac3 -b:a 192k \
+    "$WORK_DIR/stub.mpg"
+
+# Title 5: magenta test pattern, 5 seconds — the stub's real destination.
+# Reached only by following the stub's post-command chain through the
+# VMGM dispatcher PGC.
+$FFMPEG -y -loglevel error \
+    -f lavfi -i "testsrc=duration=5:size=720x480:rate=29.97,hue=h=300,\
+drawtext=${DT_HEADER}:text='Title 5 — Dispatcher Stub Destination':x=(w-tw)/2:y=30,\
+drawtext=${DT_INFO}:text='VTS 4, PGC 2 | 5s | Reached via stub post-commands':x=(w-tw)/2:y=68,\
+drawtext=${DT_INFO}:text='Root menu button 7 → stub title → VMGM PGC 3 → here':x=(w-tw)/2:y=96,\
+drawtext=${DT_BUG}:text='BUG if you see a black STUB frame instead of this':x=36:y=420,\
+drawtext=${DT_BUG}:text='BUG if playback stops after ~0.5s of nothing':x=36:y=446" \
+    -f lavfi -i "sine=frequency=770:duration=5" \
+    -target ntsc-dvd \
+    -c:a ac3 -b:a 192k \
+    "$WORK_DIR/title5.mpg"
+
 echo "=== Generating menu videos ==="
 
 # Root menu: dark gray background with button labels
-# Buttons: Title 1..4 + Title 1 Chapters + Bonus (matching SPU highlight positions)
+# Buttons: Title 1..4 + Title 1 Chapters + Bonus + Play via Stub
+# (matching SPU highlight positions)
 $FFMPEG -y -loglevel error \
     -f lavfi -i "color=c=0x333333:s=720x480:r=29.97:d=3,\
 drawtext=${DT_HEADER}:text='ROOT MENU':x=(w-tw)/2:y=40,\
@@ -131,7 +167,8 @@ drawtext=${DT_BTN}:text='Title 2':x=(w-tw)/2:y=160,\
 drawtext=${DT_BTN}:text='Title 3':x=(w-tw)/2:y=210,\
 drawtext=${DT_BTN}:text='Title 4':x=(w-tw)/2:y=260,\
 drawtext=${DT_BTN}:text='Title 1 Chapters':x=(w-tw)/2:y=310,\
-drawtext=${DT_BTN}:text='Bonus':x=(w-tw)/2:y=400" \
+drawtext=${DT_BTN}:text='Bonus':x=(w-tw)/2:y=400,\
+drawtext=${DT_BTN}:text='Play via Stub':x=(w-tw)/2:y=445" \
     -f lavfi -i "sine=frequency=330:duration=3" \
     -target ntsc-dvd \
     -c:a ac3 -b:a 192k \
@@ -200,17 +237,18 @@ echo "=== Generating subpicture images ==="
 # Button 4: "Title 4"          y=250..290
 # Button 5: "Title 1 Chapters" y=300..340
 # Button 6: "Bonus"            y=390..430
+# Button 7: "Play via Stub"    y=440..474
 
 # Normal state: gray filled rectangles at button positions (RGBA via geq filter)
 $FFMPEG -y -loglevel error \
     -f lavfi -i "color=c=white:s=720x480:d=0.04,format=rgba" \
-    -vf "geq=r=128:g=128:b=128:a='if(between(X\,240\,479)*(between(Y\,100\,139)+between(Y\,150\,189)+between(Y\,200\,239)+between(Y\,250\,289)+between(Y\,300\,339)+between(Y\,390\,429))\,128\,0)'" \
+    -vf "geq=r=128:g=128:b=128:a='if(between(X\,240\,479)*(between(Y\,100\,139)+between(Y\,150\,189)+between(Y\,200\,239)+between(Y\,250\,289)+between(Y\,300\,339)+between(Y\,390\,429)+between(Y\,440\,473))\,128\,0)'" \
     -frames:v 1 "$WORK_DIR/root_image.png"
 
 # Highlight state: white filled rectangles (same regions, full alpha)
 $FFMPEG -y -loglevel error \
     -f lavfi -i "color=c=white:s=720x480:d=0.04,format=rgba" \
-    -vf "geq=r=255:g=255:b=255:a='if(between(X\,240\,479)*(between(Y\,100\,139)+between(Y\,150\,189)+between(Y\,200\,239)+between(Y\,250\,289)+between(Y\,300\,339)+between(Y\,390\,429))\,255\,0)'" \
+    -vf "geq=r=255:g=255:b=255:a='if(between(X\,240\,479)*(between(Y\,100\,139)+between(Y\,150\,189)+between(Y\,200\,239)+between(Y\,250\,289)+between(Y\,300\,339)+between(Y\,390\,429)+between(Y\,440\,473))\,255\,0)'" \
     -frames:v 1 "$WORK_DIR/root_highlight.png"
 
 # Bonus menu: 2 buttons
@@ -255,12 +293,13 @@ cat > "$WORK_DIR/root_spu.xml" <<XMLEOF
        highlight="$WORK_DIR/root_highlight.png"
        select="$WORK_DIR/root_highlight.png"
        force="yes" >
-    <button x0="240" y0="100" x1="480" y1="140" up="6" down="2" />
+    <button x0="240" y0="100" x1="480" y1="140" up="7" down="2" />
     <button x0="240" y0="150" x1="480" y1="190" up="1" down="3" />
     <button x0="240" y0="200" x1="480" y1="240" up="2" down="4" />
     <button x0="240" y0="250" x1="480" y1="290" up="3" down="5" />
     <button x0="240" y0="300" x1="480" y1="340" up="4" down="6" />
-    <button x0="240" y0="390" x1="480" y1="430" up="5" down="1" />
+    <button x0="240" y0="390" x1="480" y1="430" up="5" down="7" />
+    <button x0="240" y0="440" x1="480" y1="474" up="6" down="1" />
   </spu>
  </stream>
 </subpictures>
@@ -330,6 +369,7 @@ cat > "$WORK_DIR/dvdauthor.xml" <<XMLEOF
         <button>jump title 4;</button>
         <button>jump titleset 1 menu;</button>
         <button>jump pgc 2;</button>
+        <button>jump title 5;</button>
       </pgc>
       <pgc pause="inf">
         <!-- Pre-command sets the initially-highlighted button. The
@@ -341,6 +381,13 @@ cat > "$WORK_DIR/dvdauthor.xml" <<XMLEOF
         <vob file="$WORK_DIR/bonus_menu_sub.mpg" pause="inf" />
         <button>jump title 1;</button>
         <button>jump pgc 1;</button>
+      </pgc>
+      <pgc>
+        <!-- Dispatcher: a command-only PGC with no vob and no buttons,
+             the shape commercial discs use as a jump pad. The stub title
+             jumps here; this picks the real destination. Shrek's VMGM
+             PGC 3 is the same thing, ending in JumpTT 10. -->
+        <pre>jump title 6;</pre>
       </pgc>
     </menus>
   </vmgm>
@@ -384,6 +431,25 @@ cat > "$WORK_DIR/dvdauthor.xml" <<XMLEOF
       </pgc>
     </titles>
   </titleset>
+  <titleset>
+    <titles>
+      <!-- Title 5: the dispatcher stub. Root menu button 7 jumps here.
+           Its post-command bounces to the VMGM dispatcher, which jumps to
+           Title 6. (Shrek uses JumpSS here; dvdauthor only permits call
+           from a title domain, but the player-side path is the same — the
+           VM must play through this cell to reach the post-command.) A player that treats this as the destination plays 0.5s
+           of black and stops — the Shrek "Play does nothing" bug. -->
+      <pgc>
+        <vob file="$WORK_DIR/stub.mpg" />
+        <post>call vmgm menu 3;</post>
+      </pgc>
+      <!-- Title 6: the real destination, reachable only via that chain. -->
+      <pgc>
+        <vob file="$WORK_DIR/title5.mpg" />
+        <post>call vmgm menu 1;</post>
+      </pgc>
+    </titles>
+  </titleset>
 </dvdauthor>
 XMLEOF
 
@@ -399,7 +465,7 @@ echo "=== Done ==="
 echo "VIDEO_TS directory: $OUT_DIR/VIDEO_TS"
 echo ""
 echo "Disc layout:"
-echo "  Root Menu (VMGM PGC 1): 6 buttons — Title 1..4, Chapters, Bonus"
+echo "  Root Menu (VMGM PGC 1): 7 buttons — Title 1..4, Chapters, Bonus, Play via Stub"
 echo "  Bonus Menu (VMGM PGC 2): 2 buttons — Play Title 1, Main Menu (tests direct menu→menu transition, no intro)"
 echo "  VTS 1 Menu Intro: 4s purple animation (non-root PGC, tests partial loading + overlay timing)"
 echo "  Chapters Sub-Menu (VTS 1 menu): 3 buttons — Chapter 1, Chapter 2, Main Menu"
@@ -407,6 +473,8 @@ echo "  Title 1 (VTS 1): 8s, blue test pattern, 2 chapters (440Hz tone)"
 echo "  Title 2 (VTS 2, PGC 1): 10s, green test pattern, 3 chapters (880Hz tone)"
 echo "  Title 3 (VTS 2, PGC 2): 4s, yellow test pattern, 1 chapter (550Hz tone)"
 echo "  Title 4 (VTS 3): 6s, red test pattern, 1 chapter (660Hz tone)"
+echo "  Title 5 (VTS 4, PGC 1): 0.5s dispatcher stub → VMGM PGC 3 → Title 6"
+echo "  Title 6 (VTS 4, PGC 2): 5s, magenta test pattern (770Hz tone)"
 echo "  First Play → Root Menu"
 echo ""
 echo "Test with:"

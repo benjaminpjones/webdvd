@@ -73,7 +73,7 @@ test.describe("DVD disc structure via WASM", () => {
       timeout: 15_000,
     });
 
-    await expect(discInfo).toContainText("4 title(s)");
+    await expect(discInfo).toContainText("6 title(s)");
   });
 
   test("title buttons are rendered", async ({ page }) => {
@@ -93,9 +93,9 @@ test.describe("DVD menu navigation", () => {
     await page.goto("/#/disc/Test%20Disc");
     await waitForMenu(page);
 
-    // Root menu should have 6 buttons (Title 1..4, Chapters, Bonus)
+    // Root menu should have 7 buttons (Title 1..4, Chapters, Bonus, Play via Stub)
     const menuLogs = logs.filter((l) => l.includes("[session] Menu"));
-    expect(menuLogs.some((l) => l.includes("6 buttons"))).toBe(true);
+    expect(menuLogs.some((l) => l.includes("7 buttons"))).toBe(true);
   });
 
   test("menu button plays title", async ({ page }) => {
@@ -298,7 +298,7 @@ test.describe("DVD menu navigation", () => {
     // and button navigation fails (dvdnav_button_* return ERR because
     // the links reference buttons that don't exist in the stale PCI).
     //
-    // This test exercises VMGM PGC 1 (root, 6 buttons) → VMGM PGC 2
+    // This test exercises VMGM PGC 1 (root, 7 buttons) → VMGM PGC 2
     // (Bonus, 2 buttons). Verifies: (a) the sub-menu is detected with 2
     // buttons, not 6; (b) button navigation inside the sub-menu works.
     const logs: string[] = [];
@@ -314,7 +314,7 @@ test.describe("DVD menu navigation", () => {
     await waitForMenu(page);
 
     // The Bonus menu log must report exactly 2 buttons. If the bug is
-    // present, JS would see 6 (stale root menu PCI) or some other wrong
+    // present, JS would see 7 (stale root menu PCI) or some other wrong
     // count depending on whether HIGHLIGHT or NAV pack order flushes first.
     const bonusDetection = logs.find((l) =>
       l.includes("[session] Menu detected via CELL_CHANGE: 2 buttons"),
@@ -337,7 +337,7 @@ test.describe("DVD menu navigation", () => {
       .slice()
       .reverse()
       .find((l) => l.includes("[session] Menu detected via CELL_CHANGE"));
-    expect(backToRoot).toContain("6 buttons");
+    expect(backToRoot).toContain("7 buttons");
   });
 
   test("VTS menu intro PGC navigates to chapters sub-menu", async ({ page }) => {
@@ -414,5 +414,43 @@ test.describe("DVD menu navigation", () => {
     expect(navScanLog).toBeTruthy();
     expect(navScanLog).toContain("hli_ss=");
     expect(navScanLog).toContain("buttons");
+  });
+  test("dispatcher stub is traversed, not played", async ({ page }) => {
+    const logs: string[] = [];
+    page.on("console", (msg) => logs.push(msg.text()));
+
+    await page.goto("/#/disc/Test%20Disc");
+    await waitForMenu(page);
+
+    const status = page.locator("#status");
+
+    // Button 7 ("Play via Stub") jumps to Title 5 — a 0.5s, 16-sector PGC
+    // with no real content, whose post-command chain (call VMGM PGC 3 →
+    // jump title 6) selects the actual destination. This is Shrek's Play
+    // button: the VM must play through the stub cell to reach those
+    // commands, which requires a title-VOB read window opened before
+    // dvd_open(). Playing the stub itself yields ~0.5s of black and a stop.
+    for (let i = 0; i < 6; i++) {
+      await page.keyboard.press("ArrowDown");
+    }
+    await page.keyboard.press("Enter");
+
+    // We must land on Title 6, never Title 5.
+    await expect(status).toContainText("Playing title 6", { timeout: 30_000 });
+    expect(await status.textContent()).not.toContain("Playing title 5");
+
+    // The stub must have been recognised and stepped over. Without this the
+    // assertion above could pass for the wrong reason (e.g. if the disc were
+    // ever re-authored to point the button straight at Title 6).
+    const stubLog = logs.find((l) => l.includes("Dispatcher stub"));
+    expect(stubLog).toBeTruthy();
+    expect(stubLog).toContain("running its post-commands instead of playing it");
+
+    // Playback should cover Title 6's range, not the stub's sectors 0-15.
+    const src = await page.locator("#video").getAttribute("data-transcode-url");
+    expect(src).toContain("/transcode/4");
+    const sectorMatch = src?.match(/sector=(\d+)/);
+    expect(sectorMatch).toBeTruthy();
+    expect(parseInt(sectorMatch![1], 10)).toBeGreaterThan(15);
   });
 });
