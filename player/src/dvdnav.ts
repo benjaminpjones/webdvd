@@ -294,6 +294,15 @@ function langCodeToString(code: number): string {
   return String.fromCharCode((code >> 8) & 0xff, code & 0xff);
 }
 
+/**
+ * Bounds identifying a "dispatcher stub" title PGC: no real content, just a
+ * jump pad whose post-commands pick the actual destination. Both the load-time
+ * scan (openTitleWindow) and the runtime check (traverseDispatcherStub) use
+ * these, so they must agree on what counts as a stub.
+ */
+export const STUB_MAX_MS = 1000;
+export const STUB_MAX_SECTORS = 512;
+
 /** State for VTS menu VOB loading */
 export interface LoadState {
   vtsPath: string;
@@ -308,6 +317,15 @@ export interface LoadState {
    * getMenuVobData), so blocks the VM already pulled are reused for free.
    */
   fetchVob: (vobName: string, startBlock: number, count: number) => Promise<Uint8Array>;
+  /**
+   * Make a title-VOB sector range readable by the VM. Title VOBs are normally
+   * 0-byte placeholders (see loadDiscFiles) so the VM hits EOF and skips them;
+   * opening a window gives the covering VOB parts their real size and serves
+   * those sectors from the server, letting the VM actually play through the
+   * cell and run its post-commands. Returns false if the range maps to no
+   * known VOB part. Sectors are titleset-relative (as in IFO cell_playback).
+   */
+  openTitleWindow: (vts: number, firstSector: number, lastSector: number) => boolean;
 }
 
 /**
@@ -356,14 +374,71 @@ async function loadDiscFiles(mod: DvdnavModule, slug: string): Promise<LoadState
       return [name, size] as const;
     }),
   );
-  // Only MENU VOBs (VIDEO_TS.VOB, VTS_nn_0.VOB) are read by the VM and served
-  // on demand. Title VOBs (VTS_nn_1.VOB …) are left as empty 0-byte
-  // placeholders: their video is delivered by the server transcoder, never the
-  // VM, and an empty title VOB makes the VM cleanly hit EOF and skip auto-play
-  // intro titles (e.g. studio-logo animations the First Play PGC jumps to)
-  // instead of streaming all of them block-by-block. This preserves the old
-  // preload's "title skip" behavior while making menus lazy.
+  // Only MENU VOBs (VIDEO_TS.VOB, VTS_nn_0.VOB) are routinely read by the VM,
+  // served from their preloaded NAV maps below. Title VOBs (VTS_nn_1.VOB …)
+  // read as empty: their video is delivered by the server transcoder, never the
+  // VM, and empty reads make the VM give up on auto-play intro titles (e.g.
+  // studio-logo animations the First Play PGC jumps to) instead of streaming
+  // all of them block-by-block. The one exception is a dispatcher-stub cell the
+  // VM must actually play through to reach its post-commands — see
+  // openTitleWindow, which makes exactly those sectors readable.
   const isMenuVob = (name: string) => name === "VIDEO_TS.VOB" || /^VTS_\d+_0\.VOB$/.test(name);
+
+  /**
+   * Title VOB parts per VTS, in playback order with their titleset-relative
+   * sector spans. libdvdread presents VTS_nn_1..9.VOB as one logical stream and
+   * IFO cell sectors index into that concatenation, so mapping a cell's sector
+   * range back to a file + file-relative block needs these running offsets.
+   */
+  interface TitleVobPart {
+    name: string;
+    path: string;
+    size: number;
+    startSector: number;
+    endSector: number;
+  }
+  const titleVobsByVts = new Map<number, TitleVobPart[]>();
+  for (const [name, size] of [...sizes].sort(([a], [b]) => a.localeCompare(b))) {
+    const m = name.match(/^VTS_(\d+)_(\d+)\.VOB$/);
+    if (!m || m[2] === "0") continue; // _0 is the menu VOB, not part of the title stream
+    const vts = parseInt(m[1], 10);
+    const parts = titleVobsByVts.get(vts) ?? [];
+    const startSector = parts.length > 0 ? parts[parts.length - 1].endSector + 1 : 0;
+    parts.push({
+      name,
+      path: `${vtsPath}/${name}`,
+      size,
+      startSector,
+      endSector: startSector + Math.floor(size / 2048) - 1,
+    });
+    titleVobsByVts.set(vts, parts);
+  }
+
+  /** Title VOB parts currently readable, keyed by file name → sector window. */
+  const titleWindows = new Map<string, { first: number; last: number; part: TitleVobPart }>();
+
+  const openTitleWindow = (vts: number, firstSector: number, lastSector: number): boolean => {
+    const parts = titleVobsByVts.get(vts);
+    if (!parts) return false;
+    let opened = false;
+    for (const part of parts) {
+      if (part.endSector < firstSector || part.startSector > lastSector) continue;
+      titleWindows.set(part.name, {
+        first: Math.max(firstSector, part.startSector),
+        last: Math.min(lastSector, part.endSector),
+        part,
+      });
+      // Give just this part its real size. libdvdread caches a file's size when
+      // it opens it, so this only takes effect if it happens before the VM
+      // first enters the title domain — hence the load-time scan below rather
+      // than opening windows reactively. Every other title VOB keeps size 0 and
+      // still reads as EOF, so intro titles are skipped exactly as before.
+      mod.FS.lookupPath(part.path).node.usedBytes = part.size;
+      opened = true;
+    }
+    return opened;
+  };
+
   for (const [name, size] of sizes) {
     const p = `${vtsPath}/${name}`;
     mod.FS.writeFile(p, new Uint8Array(0));
@@ -405,15 +480,42 @@ async function loadDiscFiles(mod: DvdnavModule, slug: string): Promise<LoadState
   // map — NAV pack where one exists, zeros elsewhere — with no network during
   // navigation. Title VOBs report empty (EOF) so the VM skips intro titles
   // instead of streaming them.
-  mod.onVobRead = (path: string, startBlock: number, count: number) => {
-    const navMap = navMaps.get(path.slice(path.lastIndexOf("/") + 1));
-    if (!navMap) return Promise.resolve(EMPTY);
+  mod.onVobRead = async (path: string, startBlock: number, count: number) => {
+    const name = path.slice(path.lastIndexOf("/") + 1);
+
+    // Title VOB inside an open window (see openTitleWindow): serve the real
+    // bytes so the VM can play through the cell. `startBlock` is file-relative;
+    // the window is in titleset-relative sectors.
+    const win = titleWindows.get(name);
+    if (win) {
+      const from = win.part.startSector + startBlock;
+      const to = from + count - 1;
+      if (to < win.first || from > win.last) return EMPTY;
+      const clampedFrom = Math.max(from, win.first);
+      const clampedTo = Math.min(to, win.last);
+      const data = await fetchVob(
+        name,
+        clampedFrom - win.part.startSector,
+        clampedTo - clampedFrom + 1,
+      );
+      if (data.length === 0) return EMPTY;
+      if (clampedFrom === from && data.length === count * 2048) return data;
+      const out = new Uint8Array(count * 2048);
+      out.set(
+        data.subarray(0, Math.min(data.length, out.length - (clampedFrom - from) * 2048)),
+        (clampedFrom - from) * 2048,
+      );
+      return out;
+    }
+
+    const navMap = navMaps.get(name);
+    if (!navMap) return EMPTY;
     const out = new Uint8Array(count * 2048);
     for (let i = 0; i < count; i++) {
       const nav = navMap.get(startBlock + i);
       if (nav) out.set(nav, i * 2048);
     }
-    return Promise.resolve(out);
+    return out;
   };
 
   // Real VOB bytes for SPU demux (getMenuVobData) — fetched on demand with a
@@ -449,7 +551,7 @@ async function loadDiscFiles(mod: DvdnavModule, slug: string): Promise<LoadState
   // Parse menu PGC cell info from each VTS IFO (menu cell sector ranges for
   // SPU demux + cell timings). IFOs are already in MEMFS; the refetch is a
   // browser-cache hit thanks to the immutable Cache-Control header.
-  const { parseMenuPgcs } = await ifoParserPromise;
+  const { parseMenuPgcs, parseTitlePgcs } = await ifoParserPromise;
   const vtsMenuPgcs = new Map<number, import("./ifo-parser").PgcCells[]>();
   await Promise.all(
     ifoFiles.map(async (ifo) => {
@@ -457,11 +559,27 @@ async function loadDiscFiles(mod: DvdnavModule, slug: string): Promise<LoadState
       if (!m) return;
       const resp = await discFetch(`/ifo/${ifo}`);
       if (!resp.ok) return;
-      vtsMenuPgcs.set(parseInt(m[1], 10), parseMenuPgcs(await resp.arrayBuffer()));
+      const vts = parseInt(m[1], 10);
+      const buf = await resp.arrayBuffer();
+      vtsMenuPgcs.set(vts, parseMenuPgcs(buf));
+
+      // Open a read window over every dispatcher-stub title PGC — a degenerate
+      // PGC (a fraction of a second over a handful of sectors) that exists only
+      // to run a post-command chain selecting the real destination. The VM has
+      // to play through one to reach those commands, and this must be set up
+      // before the disc is opened, so scan for them here rather than waiting
+      // for the VM to report the cell. Stubs are a few dozen sectors, so this
+      // is effectively free. See SessionManager.traverseDispatcherStub.
+      for (const pgc of parseTitlePgcs(buf)) {
+        const sectors = pgc.lastSector - pgc.firstSector + 1;
+        if (pgc.durationMs > STUB_MAX_MS) continue;
+        if (sectors <= 0 || sectors > STUB_MAX_SECTORS) continue;
+        openTitleWindow(vts, pgc.firstSector, pgc.lastSector);
+      }
     }),
   );
 
-  return { vtsPath, mod, slug, vtsMenuPgcs, fetchVob };
+  return { vtsPath, mod, slug, vtsMenuPgcs, fetchVob, openTitleWindow };
 }
 
 /** Raw JSON shape returned by dvd_describe_title() in the C glue */
@@ -711,6 +829,15 @@ export class DvdSession {
     const pgcs = this.loadState.vtsMenuPgcs.get(vtsN);
     if (!pgcs) return null;
     return pgcs.flatMap((p) => p.rawCells);
+  }
+
+  /**
+   * Let the VM read through a short title cell (see LoadState.openTitleWindow)
+   * so its post-commands run. Used for dispatcher-stub PGCs, which exist only
+   * to jump somewhere else and have no video worth transcoding.
+   */
+  openTitleWindow(vtsN: number, firstSector: number, lastSector: number): boolean {
+    return this.loadState?.openTitleWindow(vtsN, firstSector, lastSector) ?? false;
   }
 
   /** Reset the VM to First Play PGC state (close + reopen) */
