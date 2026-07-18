@@ -16,14 +16,14 @@
  * front, so the seek bar shows the full length immediately on every browser.
  */
 
-// H.264 High@4.0 + AAC-LC. The server pins `-profile:v high -level 4.0`, which
-// makes the emitted codec string exactly avc1.640028 (verified from the avcC
-// box). MediaSource — Safari especially — rejects a codec string that doesn't
-// match the actual bitstream, so this must stay in lockstep with the ffmpeg
-// args in server/src/transcode.rs.
-const VIDEO_CODEC = "avc1.640028";
-const AUDIO_CODEC = "mp4a.40.2";
-export const MSE_MIME = `video/mp4; codecs="${VIDEO_CODEC}, ${AUDIO_CODEC}"`;
+import { parseInitSegmentCodecs, type CodecInfo } from "./mp4-codec";
+
+// Capability probe only. MediaSource — Safari especially — rejects a codec
+// string that doesn't match the actual bitstream, so we don't declare a fixed
+// codec: the real one is derived from the init segment at stream time (see
+// onSourceOpen). This string just answers "can this browser MSE-decode the
+// H.264 High\@4.0 + AAC-LC the server normally produces?" for support detection.
+const PROBE_MIME = 'video/mp4; codecs="avc1.640028, mp4a.40.2"';
 
 // Title buffer window (seconds). We can't hold a two-hour movie in memory, so
 // we keep a bounded window around the playhead: pause fetching once we're
@@ -55,10 +55,10 @@ function mediaSourceCtor(): { ctor: MediaSourceCtor; managed: boolean } | null {
     ManagedMediaSource?: MediaSourceCtor;
     MediaSource?: MediaSourceCtor;
   };
-  if (w.ManagedMediaSource?.isTypeSupported(MSE_MIME)) {
+  if (w.ManagedMediaSource?.isTypeSupported(PROBE_MIME)) {
     return { ctor: w.ManagedMediaSource, managed: true };
   }
-  if (w.MediaSource?.isTypeSupported(MSE_MIME)) {
+  if (w.MediaSource?.isTypeSupported(PROBE_MIME)) {
     return { ctor: w.MediaSource, managed: false };
   }
   return null;
@@ -93,6 +93,7 @@ export interface MseOptions {
 export class MseSource {
   private readonly video: HTMLVideoElement;
   private readonly ms: MediaSourceLike;
+  private readonly ctor: MediaSourceCtor;
   private readonly managed: boolean;
   private readonly objectUrl: string;
   private readonly opts: MseOptions;
@@ -110,6 +111,7 @@ export class MseSource {
     this.video = video;
     this.opts = opts;
     this.managed = sel.managed;
+    this.ctor = sel.ctor;
     this.ms = new sel.ctor();
     this.objectUrl = URL.createObjectURL(this.ms as unknown as MediaSource);
 
@@ -155,7 +157,41 @@ export class MseSource {
   private async onSourceOpen(url: string) {
     if (this.destroyed) return;
     try {
-      const sb = this.ms.addSourceBuffer(MSE_MIME);
+      const res = await fetch(url, { signal: this.ac.signal });
+      if (!res.ok || !res.body) {
+        throw new Error(`transcode fetch failed: ${res.status} ${res.statusText}`);
+      }
+      const reader = res.body.getReader();
+
+      // Read just enough of the stream to see the whole init segment (moov),
+      // then derive the exact codec string from it. This keeps the SourceBuffer
+      // MIME in lockstep with the actual bitstream with no hard-coded value to
+      // drift out of sync with the server's ffmpeg flags.
+      const prefix: Uint8Array[] = [];
+      let prefixLen = 0;
+      let codecs: CodecInfo | null = null;
+      const INIT_CAP = 1 << 18; // 256 KiB — moov is a few KB; bail if we blow past
+      while (!codecs) {
+        const { done, value } = await reader.read();
+        if (this.destroyed) {
+          await reader.cancel().catch(() => {});
+          return;
+        }
+        if (done) break;
+        if (value && value.length) {
+          prefix.push(value);
+          prefixLen += value.length;
+          codecs = parseInitSegmentCodecs(concat(prefix, prefixLen));
+        }
+        if (!codecs && prefixLen > INIT_CAP) break;
+      }
+      if (!codecs) throw new Error("could not derive codec string from init segment");
+      if (!this.ctor.isTypeSupported(codecs.mime)) {
+        throw new Error(`codec not supported by MediaSource: ${codecs.mime}`);
+      }
+      this.log(`MSE codec: ${codecs.mime}`);
+
+      const sb = this.ms.addSourceBuffer(codecs.mime);
       this.sb = sb;
       sb.addEventListener("updateend", this.onWake);
 
@@ -169,11 +205,9 @@ export class MseSource {
         }
       }
 
-      const res = await fetch(url, { signal: this.ac.signal });
-      if (!res.ok || !res.body) {
-        throw new Error(`transcode fetch failed: ${res.status} ${res.statusText}`);
-      }
-      await this.pump(res.body.getReader());
+      // Feed the bytes we buffered while sniffing, then stream the rest.
+      await this.append(concat(prefix, prefixLen));
+      await this.pump(reader);
     } catch (err) {
       if (this.destroyed || this.ac.signal.aborted) return;
       this.log(`MSE error: ${String(err)}`);
@@ -337,4 +371,16 @@ export class MseSource {
       /* already revoked */
     }
   }
+}
+
+/** Concatenate buffered chunks into one contiguous Uint8Array. */
+function concat(chunks: Uint8Array[], totalLen: number): Uint8Array {
+  if (chunks.length === 1) return chunks[0];
+  const out = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.length;
+  }
+  return out;
 }
