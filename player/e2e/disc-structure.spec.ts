@@ -1,4 +1,14 @@
 import { test, expect } from "@playwright/test";
+import { rmSync } from "node:fs";
+
+// Clear the transcode cache before each test so titles are always uncached and
+// exercise the MSE streaming path deterministically. Otherwise a title cached
+// (and remuxed to a seekable file) by an earlier test would play via the native
+// range path instead, changing the src/data-transcode-url the assertions check.
+const CACHE_DIR = `${process.env.WEBDVD_TEST_DISC ?? "/tmp/webdvd-test"}/.cache`;
+test.beforeEach(() => {
+  rmSync(CACHE_DIR, { recursive: true, force: true });
+});
 
 /**
  * Helper: wait for the status element to settle on "Menu".

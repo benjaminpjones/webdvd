@@ -40,6 +40,7 @@ pub async fn transcode_to_stream(
     cache: Arc<Cache>,
     key: CacheKey,
     permit: tokio::sync::OwnedSemaphorePermit,
+    cache_output: bool,
 ) -> anyhow::Result<axum::body::Body> {
     if vob_files.is_empty() {
         anyhow::bail!("No VOB files to transcode");
@@ -70,7 +71,11 @@ pub async fn transcode_to_stream(
 
     let args = build_ffmpeg_args(opts, use_stdin, concat_file.path());
 
-    let stdin_mode = if use_stdin { Stdio::piped() } else { Stdio::null() };
+    let stdin_mode = if use_stdin {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
     let mut child = Command::new("ffmpeg")
         .args(&args)
         .stdin(stdin_mode)
@@ -79,7 +84,9 @@ pub async fn transcode_to_stream(
         .spawn()?;
 
     if use_stdin {
-        let mut stdin = child.stdin.take()
+        let mut stdin = child
+            .stdin
+            .take()
             .ok_or_else(|| anyhow::anyhow!("Failed to capture ffmpeg stdin"))?;
 
         let sector = opts.sector;
@@ -116,6 +123,7 @@ pub async fn transcode_to_stream(
         stdout,
         child,
         (concat_file, permit),
+        cache_output,
     );
     Ok(body)
 }
@@ -126,11 +134,7 @@ pub async fn transcode_to_stream(
 /// that audio stream 0x80 (primary language per DVD convention) is
 /// explicitly mapped, preventing ffmpeg's default stream picker from
 /// selecting whichever audio appears first in the pipe bytes.
-fn build_ffmpeg_args(
-    opts: &TranscodeOpts,
-    use_stdin: bool,
-    concat_path: &Path,
-) -> Vec<String> {
+fn build_ffmpeg_args(opts: &TranscodeOpts, use_stdin: bool, concat_path: &Path) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
 
     // Input seeking (-ss before -i for fast seek)
@@ -141,14 +145,18 @@ fn build_ffmpeg_args(
     if use_stdin {
         args.extend([
             "-y".to_string(),
-            "-f".to_string(), "mpeg".to_string(),
-            "-i".to_string(), "pipe:0".to_string(),
+            "-f".to_string(),
+            "mpeg".to_string(),
+            "-i".to_string(),
+            "pipe:0".to_string(),
         ]);
     } else {
         args.extend([
             "-y".to_string(),
-            "-f".to_string(), "concat".to_string(),
-            "-safe".to_string(), "0".to_string(),
+            "-f".to_string(),
+            "concat".to_string(),
+            "-safe".to_string(),
+            "0".to_string(),
             "-i".to_string(),
         ]);
         args.push(concat_path.to_string_lossy().to_string());
@@ -180,19 +188,26 @@ fn build_ffmpeg_args(
     args.extend(["-vf".to_string(), "yadif".to_string()]);
 
     args.extend([
-        "-preset".to_string(), "fast".to_string(),
-        "-crf".to_string(), "23".to_string(),
-        "-c:a".to_string(), "aac".to_string(),
-        "-b:a".to_string(), "192k".to_string(),
-        "-ac".to_string(), "2".to_string(),
+        "-preset".to_string(),
+        "fast".to_string(),
+        "-crf".to_string(),
+        "23".to_string(),
+        "-c:a".to_string(),
+        "aac".to_string(),
+        "-b:a".to_string(),
+        "192k".to_string(),
+        "-ac".to_string(),
+        "2".to_string(),
         // `+default_base_moof` is REQUIRED for MediaSource: without it ffmpeg
         // writes `base-data-offset` addressing in each `tfhd`, which MSE forbids
         // (it demands movie-fragment-relative addressing). Chrome rejects the
         // append with CHUNK_DEMUXER_ERROR_APPEND_FAILED; Safari/Firefox can't
         // play it at all. See mse-byte-stream-format-isobmff §movie-fragment-
         // relative-addressing.
-        "-movflags".to_string(), "+frag_keyframe+empty_moov+default_base_moof".to_string(),
-        "-f".to_string(), "mp4".to_string(),
+        "-movflags".to_string(),
+        "+frag_keyframe+empty_moov+default_base_moof".to_string(),
+        "-f".to_string(),
+        "mp4".to_string(),
         "pipe:1".to_string(),
     ]);
 
@@ -212,21 +227,21 @@ fn parse_nav_pack(sector_data: &[u8]) -> Option<(u32, u16, bool, u32)> {
     //   1stref_ea(4) + 2ndref_ea(4) + 3rdref_ea(4) + vobu_vob_idn(2)
     let dsi = 0x407;
     let vobu_ea = u32::from_be_bytes([
-        sector_data[dsi + 8], sector_data[dsi + 9],
-        sector_data[dsi + 10], sector_data[dsi + 11],
+        sector_data[dsi + 8],
+        sector_data[dsi + 9],
+        sector_data[dsi + 10],
+        sector_data[dsi + 11],
     ]);
-    let vob_id = u16::from_be_bytes([
-        sector_data[dsi + 24], sector_data[dsi + 25],
-    ]);
+    let vob_id = u16::from_be_bytes([sector_data[dsi + 24], sector_data[dsi + 25]]);
     // sml_pbi starts at dsi + 32 (sizeof dsi_gi)
     let sml = dsi + 32;
-    let category = u16::from_be_bytes([
-        sector_data[sml], sector_data[sml + 1],
-    ]);
+    let category = u16::from_be_bytes([sector_data[sml], sector_data[sml + 1]]);
     let ilvu_flag = (category >> 14) & 1 == 1;
     let ilvu_ea = u32::from_be_bytes([
-        sector_data[sml + 2], sector_data[sml + 3],
-        sector_data[sml + 4], sector_data[sml + 5],
+        sector_data[sml + 2],
+        sector_data[sml + 3],
+        sector_data[sml + 4],
+        sector_data[sml + 5],
     ]);
     Some((vobu_ea, vob_id, ilvu_flag, ilvu_ea))
 }
@@ -302,17 +317,18 @@ async fn pipe_dvdread(
                         }
                     };
 
-                    let (vobu_ea, vob_id, ilvu_flag, _ilvu_ea) =
-                        match parse_nav_pack(&nav_data) {
-                            Some(v) => v,
-                            None => {
-                                // Not a valid NAV pack — read as bulk data
-                                // (shouldn't happen in well-formed VOBs)
-                                if tx.blocking_send(nav_data).is_err() { break; }
-                                offset += 1;
-                                continue;
+                    let (vobu_ea, vob_id, ilvu_flag, _ilvu_ea) = match parse_nav_pack(&nav_data) {
+                        Some(v) => v,
+                        None => {
+                            // Not a valid NAV pack — read as bulk data
+                            // (shouldn't happen in well-formed VOBs)
+                            if tx.blocking_send(nav_data).is_err() {
+                                break;
                             }
-                        };
+                            offset += 1;
+                            continue;
+                        }
+                    };
 
                     let vobu_size = vobu_ea as u64 + 1; // vobu_ea is inclusive end offset
                     let vobu_end = (offset + vobu_size).min(end_block);
@@ -337,7 +353,9 @@ async fn pipe_dvdread(
                     }
 
                     // Send the NAV pack we already read
-                    if tx.blocking_send(nav_data).is_err() { break; }
+                    if tx.blocking_send(nav_data).is_err() {
+                        break;
+                    }
 
                     // Read and send the rest of the VOBU (sectors after NAV pack)
                     if vobu_size > 1 {
@@ -345,10 +363,15 @@ async fn pipe_dvdread(
                         if rest_count > 0 {
                             match dvd_file.read_blocks((offset + 1) as u32, rest_count) {
                                 Ok(data) => {
-                                    if tx.blocking_send(data).is_err() { break; }
+                                    if tx.blocking_send(data).is_err() {
+                                        break;
+                                    }
                                 }
                                 Err(e) => {
-                                    tracing::error!("DVDReadBlocks error at block {}: {e}", offset + 1);
+                                    tracing::error!(
+                                        "DVDReadBlocks error at block {}: {e}",
+                                        offset + 1
+                                    );
                                     break;
                                 }
                             }
@@ -393,9 +416,7 @@ async fn pipe_dvdread(
         format!("VTS_{:02}_1.VOB", titleset)
     };
 
-    let data = tokio::task::spawn_blocking(move || {
-        disc.read_file(&vob_name)
-    }).await??;
+    let data = tokio::task::spawn_blocking(move || disc.read_file(&vob_name)).await??;
 
     tracing::info!("Piping {} bytes of VOB data to ffmpeg", data.len());
     stdin.write_all(&data).await?;
@@ -435,7 +456,9 @@ async fn pipe_raw_files(
 
     tracing::info!(
         "Piping {} VOB(s) from byte {byte_offset} (sector {:?}), max_bytes={:?}",
-        vob_paths.len(), sector, max_bytes,
+        vob_paths.len(),
+        sector,
+        max_bytes,
     );
 
     let mut buf = vec![0u8; 65536];
@@ -445,17 +468,17 @@ async fn pipe_raw_files(
         let mut file = tokio::fs::File::open(path).await?;
         // Seek into the first file; subsequent files start from 0
         if offset_in_file > 0 {
-            tokio::io::AsyncSeekExt::seek(
-                &mut file,
-                std::io::SeekFrom::Start(offset_in_file),
-            ).await?;
+            tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(offset_in_file))
+                .await?;
             offset_in_file = 0;
         }
 
         loop {
             let to_read = if let Some(max) = max_bytes {
                 let remaining = max.saturating_sub(bytes_written);
-                if remaining == 0 { break; }
+                if remaining == 0 {
+                    break;
+                }
                 buf.len().min(remaining as usize)
             } else {
                 buf.len()
@@ -474,7 +497,10 @@ async fn pipe_raw_files(
 
         // If byte limit reached, stop
         if let Some(max) = max_bytes
-            && bytes_written >= max { break; }
+            && bytes_written >= max
+        {
+            break;
+        }
     }
 
     Ok(())
@@ -491,7 +517,11 @@ mod tests {
     #[test]
     fn ffmpeg_args_pin_audio_to_stream_0x80() {
         let opts = TranscodeOpts::default();
-        let args = build_ffmpeg_args(&opts, /* use_stdin */ true, Path::new("/tmp/concat.txt"));
+        let args = build_ffmpeg_args(
+            &opts,
+            /* use_stdin */ true,
+            Path::new("/tmp/concat.txt"),
+        );
 
         // Walk the args and find every -map value
         let maps: Vec<&str> = args
@@ -518,7 +548,11 @@ mod tests {
     #[test]
     fn ffmpeg_args_pin_h264_profile_and_level() {
         let opts = TranscodeOpts::default();
-        let args = build_ffmpeg_args(&opts, /* use_stdin */ true, Path::new("/tmp/concat.txt"));
+        let args = build_ffmpeg_args(
+            &opts,
+            /* use_stdin */ true,
+            Path::new("/tmp/concat.txt"),
+        );
 
         let value_after = |flag: &str| -> Option<&str> {
             args.windows(2)
@@ -545,7 +579,11 @@ mod tests {
     #[test]
     fn ffmpeg_args_use_movie_fragment_relative_addressing() {
         let opts = TranscodeOpts::default();
-        let args = build_ffmpeg_args(&opts, /* use_stdin */ true, Path::new("/tmp/concat.txt"));
+        let args = build_ffmpeg_args(
+            &opts,
+            /* use_stdin */ true,
+            Path::new("/tmp/concat.txt"),
+        );
 
         let movflags = args
             .windows(2)
@@ -651,7 +689,12 @@ mod tests {
         //   VOBU 4: ILVU, vob_id=5      (Cell 2, angle 2 — skip)
         //   VOBU 5: non-ILVU, vob_id=4  (Cell 3)
         let vobus: Vec<(u16, bool)> = vec![
-            (3, false), (4, true), (5, true), (4, true), (5, true), (4, false),
+            (3, false),
+            (4, true),
+            (5, true),
+            (4, true),
+            (5, true),
+            (4, false),
         ];
 
         let sent = filter_vobus(&vobus);
@@ -663,9 +706,11 @@ mod tests {
     #[test]
     fn ilvu_filtering_handles_region_transitions() {
         let vobus: Vec<(u16, bool)> = vec![
-            (4, true), (5, true),   // Region 1: target=4
-            (6, false),              // Gap resets
-            (7, true), (8, true),   // Region 2: target=7
+            (4, true),
+            (5, true),  // Region 1: target=4
+            (6, false), // Gap resets
+            (7, true),
+            (8, true), // Region 2: target=7
         ];
 
         let sent = filter_vobus(&vobus);
@@ -675,9 +720,7 @@ mod tests {
     /// All non-ILVU VOBUs should pass through regardless of vob_id.
     #[test]
     fn ilvu_filtering_passes_all_non_ilvu() {
-        let vobus: Vec<(u16, bool)> = vec![
-            (1, false), (2, false), (3, false),
-        ];
+        let vobus: Vec<(u16, bool)> = vec![(1, false), (2, false), (3, false)];
 
         let sent = filter_vobus(&vobus);
         assert_eq!(sent, vec![1, 2, 3]);

@@ -82,6 +82,13 @@ export class SessionManager {
   // target time. Keyed by `${vts}:${firstSector}:${lastSector}`.
   private titleMaps = new Map<string, { map: TimeSectorEntry[]; durationSec: number }>();
   private titleMapsLoaded = false;
+  // Titles whose full transcode is cached as a seekable (faststart) file, keyed
+  // like titleMaps. These play via native range-seekable <video> (instant
+  // seeking, no re-transcode) instead of the MSE streaming path.
+  private titleCached = new Map<string, boolean>();
+  // True while the current title plays from the native cached file, so the
+  // seek handler defers to the browser instead of re-transcoding.
+  private nativeMode = false;
   // The currently playing title's map (looked up from titleMaps).
   private titleTimeMap: TimeSectorEntry[] = [];
   private titleDurationSec = 0;
@@ -120,6 +127,8 @@ export class SessionManager {
 
   private onVideoSeeking = () => {
     if (this._state !== "playing") return;
+    // Native cached playback is a real seekable file — let the browser seek.
+    if (this.nativeMode) return;
     const t = this.video.currentTime;
     // Ignore our own repositioning (segment start / seek resume).
     if (this.programmaticSeekSec !== null && Math.abs(t - this.programmaticSeekSec) < 0.75) {
@@ -987,7 +996,41 @@ export class SessionManager {
         }
       }),
     );
-    this.log(`Preloaded ${this.titleMaps.size} title map(s)`);
+
+    // Probe which titles are already cached as a seekable file → native
+    // range playback instead of MSE streaming.
+    await Promise.all(
+      this.structure.titles.map(async (t) => {
+        const cached = await this.probeTitleCached(t.vts, t.firstSector, t.lastSector);
+        if (cached) this.titleCached.set(`${t.vts}:${t.firstSector}:${t.lastSector}`, true);
+      }),
+    );
+    this.log(
+      `Preloaded ${this.titleMaps.size} title map(s), ${this.titleCached.size} seekable-cached`,
+    );
+  }
+
+  /** HEAD the seekable-file endpoint: 200 ⇒ the full title is cached seekable. */
+  private async probeTitleCached(
+    vts: number,
+    firstSector: number,
+    lastSector: number,
+  ): Promise<boolean> {
+    if (vts <= 0) return false;
+    try {
+      const res = await fetch(this.titleFileUrl(vts, firstSector, lastSector), { method: "HEAD" });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  private titleFileUrl(vts: number, firstSector: number, lastSector: number): string {
+    const params = new URLSearchParams();
+    if (firstSector > 0) params.set("sector", String(firstSector));
+    if (lastSector > 0) params.set("lastSector", String(lastSector));
+    const qs = params.toString();
+    return `${this.apiBase}/title-file/${vts}${qs ? `?${qs}` : ""}`;
   }
 
   /** Point the current-title map fields at the cached map for this title. */
@@ -1061,42 +1104,68 @@ export class SessionManager {
     this.titleVts = vts;
     this.titleLastSector = target.lastSector ?? titleInfo?.lastSector ?? 0;
 
-    let url = `${this.apiBase}/transcode/${vts}`;
-    const params = new URLSearchParams();
-    if (target.sector && target.sector > 0) {
-      params.set("sector", String(target.sector));
-    }
-    if (target.lastSector && target.lastSector > 0) {
-      params.set("lastSector", String(target.lastSector));
-    }
-    const qs = params.toString();
-    if (qs) url += `?${qs}`;
-
-    // Where this segment sits on the full-movie timeline. Playback also resumes
-    // here (the transcode starts at this cell, so it's instantly available).
+    // Where this segment sits on the full-movie timeline. Playback resumes here.
     const segStartSec = this.segmentStartSec(target.sector);
 
-    // With a title map, the bar spans the whole movie (totalDurationSec) and the
-    // segment is offset into it. Without one, fall back to a rough estimate of
-    // the remaining runtime so the bar at least has a length.
-    const totalDurationSec = this.titleDurationSec > 0 ? this.titleDurationSec : undefined;
-    let durationHintSec: number | undefined;
-    if (!totalDurationSec && titleInfo && titleInfo.durationMs > 0) {
-      const chapterStartMs = target.part > 1 ? (titleInfo.chapterTimesMs[target.part - 2] ?? 0) : 0;
-      durationHintSec = Math.max(0, (titleInfo.durationMs - chapterStartMs) / 1000);
-    }
+    const canonicalKey = titleInfo ? `${vts}:${titleInfo.firstSector}:${titleInfo.lastSector}` : "";
 
     this.video.muted = false; // unmute for title playback
     this.video.loop = false; // titles don't loop — onended resumes VM
-    this.attachSource(url, {
-      durationHintSec,
-      totalDurationSec,
-      timestampOffsetSec: segStartSec,
-      startAtSec: segStartSec,
-      onProgrammaticSeek: (sec) => {
-        this.programmaticSeekSec = sec;
-      },
-    });
+
+    if (titleInfo && this.titleCached.get(canonicalKey)) {
+      // The whole title is cached as a seekable file — play it natively with
+      // HTTP Range so seeking anywhere is instant and needs no re-transcode.
+      this.nativeMode = true;
+      this.detachSource();
+      const fileUrl = this.titleFileUrl(vts, titleInfo.firstSector, titleInfo.lastSector);
+      this.log(`Playing cached seekable title natively (seek to ${segStartSec.toFixed(1)}s)`);
+      this.video.setAttribute("data-transcode-url", fileUrl);
+      this.video.src = fileUrl;
+      this.video.load();
+      if (segStartSec > 0) {
+        const onMeta = () => {
+          this.video.removeEventListener("loadedmetadata", onMeta);
+          this.video.currentTime = segStartSec; // native range-seek into the file
+        };
+        this.video.addEventListener("loadedmetadata", onMeta);
+      }
+    } else {
+      // Streaming path: MSE. Mid-title (seek) segments aren't canonical, so tag
+      // them nocache — only the from-start transcode is cached (then remuxed to
+      // the seekable file that flips this title to native mode next time).
+      this.nativeMode = false;
+      const isCanonical = !target.sector || target.sector === titleInfo?.firstSector;
+      let url = `${this.apiBase}/transcode/${vts}`;
+      const params = new URLSearchParams();
+      if (target.sector && target.sector > 0) params.set("sector", String(target.sector));
+      if (target.lastSector && target.lastSector > 0) {
+        params.set("lastSector", String(target.lastSector));
+      }
+      if (!isCanonical) params.set("nocache", "1");
+      const qs = params.toString();
+      if (qs) url += `?${qs}`;
+
+      // With a title map, the bar spans the whole movie (totalDurationSec) and
+      // the segment is offset into it. Without one, fall back to a rough
+      // estimate of the remaining runtime so the bar at least has a length.
+      const totalDurationSec = this.titleDurationSec > 0 ? this.titleDurationSec : undefined;
+      let durationHintSec: number | undefined;
+      if (!totalDurationSec && titleInfo && titleInfo.durationMs > 0) {
+        const chapterStartMs =
+          target.part > 1 ? (titleInfo.chapterTimesMs[target.part - 2] ?? 0) : 0;
+        durationHintSec = Math.max(0, (titleInfo.durationMs - chapterStartMs) / 1000);
+      }
+
+      this.attachSource(url, {
+        durationHintSec,
+        totalDurationSec,
+        timestampOffsetSec: segStartSec,
+        startAtSec: segStartSec,
+        onProgrammaticSeek: (sec) => {
+          this.programmaticSeekSec = sec;
+        },
+      });
+    }
 
     const onCanPlay = () => {
       this.video.removeEventListener("canplay", onCanPlay);

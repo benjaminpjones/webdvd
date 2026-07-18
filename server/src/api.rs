@@ -2,14 +2,20 @@ use std::sync::Arc;
 
 use axum::{
     Router,
+    body::Body,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
-    response::{IntoResponse, Json},
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
 };
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tower_http::cors::CorsLayer;
 
-use crate::{AppState, auth, cache, disc::{Disc, Visibility}, transcode};
+use crate::{
+    AppState, auth, cache,
+    disc::{Disc, Visibility},
+    transcode,
+};
 
 /// Disc files (IFO/VOB sectors) are immutable for the life of a disc, so let
 /// the browser cache them indefinitely. `private` keeps shared proxies from
@@ -23,7 +29,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/me", get(auth_status))
         .route("/api/disc/{slug}/info", get(disc_info))
-        .route("/api/disc/{slug}/transcode/{titleset}", get(transcode_titleset))
+        .route(
+            "/api/disc/{slug}/transcode/{titleset}",
+            get(transcode_titleset),
+        )
         .route("/api/disc/{slug}/ifo-list", get(ifo_list))
         .route("/api/disc/{slug}/ifo/{filename}", get(ifo_file))
         .route("/api/disc/{slug}/vob-list", get(vob_list))
@@ -31,7 +40,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/disc/{slug}/vob-range/{filename}", get(vob_range))
         .route("/api/disc/{slug}/vob-size/{filename}", get(vob_size))
         .route("/api/disc/{slug}/menu-nav/{filename}", get(menu_nav))
-        .route("/api/disc/{slug}/transcode-menu/{titleset}", get(transcode_menu))
+        .route(
+            "/api/disc/{slug}/transcode-menu/{titleset}",
+            get(transcode_menu),
+        )
+        .route(
+            "/api/disc/{slug}/title-file/{titleset}",
+            get(title_file).head(title_file_head),
+        )
         // TODO: /api/disc/{slug}/thumbnail — see GitHub issue for metadata/cover art
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -55,7 +71,12 @@ fn require_access(
     headers: &HeaderMap,
 ) -> Result<Arc<Disc>, (StatusCode, String)> {
     let not_found = || (StatusCode::NOT_FOUND, format!("Disc not found: {slug}"));
-    let disc = state.library.discs.get(slug).cloned().ok_or_else(not_found)?;
+    let disc = state
+        .library
+        .discs
+        .get(slug)
+        .cloned()
+        .ok_or_else(not_found)?;
     if disc.visibility == Visibility::Private && !is_authed(state, headers) {
         return Err(not_found());
     }
@@ -125,10 +146,7 @@ async fn logout() -> impl IntoResponse {
     (hdrs, Json(serde_json::json!({ "ok": true })))
 }
 
-async fn auth_status(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Json<serde_json::Value> {
+async fn auth_status(State(state): State<AppState>, headers: HeaderMap) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "enabled": state.auth.enabled(),
         "authenticated": is_authed(&state, &headers),
@@ -231,16 +249,21 @@ async fn vob_range(
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("VOB not found: {filename}")))?;
 
     let fname = filename.clone();
-    let (data, total_size) = tokio::task::spawn_blocking(move || {
-        disc.read_vob_range(&fname, params.start, params.end)
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let (data, total_size) =
+        tokio::task::spawn_blocking(move || disc.read_vob_range(&fname, params.start, params.end))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let mut headers = axum::http::HeaderMap::new();
-    headers.insert(axum::http::header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
-    headers.insert(axum::http::header::CACHE_CONTROL, DISC_CACHE_CONTROL.parse().unwrap());
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "application/octet-stream".parse().unwrap(),
+    );
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        DISC_CACHE_CONTROL.parse().unwrap(),
+    );
     headers.insert("x-vob-total-size", total_size.to_string().parse().unwrap());
 
     Ok((headers, data))
@@ -298,6 +321,9 @@ struct TranscodeParams {
     t: Option<f64>,
     sector: Option<u64>,
     last_sector: Option<u64>,
+    /// `nocache=1` for ephemeral mid-title seek segments — stream without
+    /// caching, so they don't accumulate overlapping per-sector tails on disk.
+    nocache: Option<u8>,
 }
 
 /// Acquire a transcode-slot permit with timeout. Returns 503 if the queue
@@ -374,15 +400,128 @@ async fn transcode_menu(
     let permit = acquire_transcode_slot(&state).await?;
 
     let body = transcode::transcode_to_stream(
-        &vobs, &opts, &disc, titleset, true, state.cache.clone(), key, permit,
+        &vobs,
+        &opts,
+        &disc,
+        titleset,
+        true,
+        state.cache.clone(),
+        key,
+        permit,
+        /* cache_output */ true,
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok((
-        [(axum::http::header::CONTENT_TYPE, "video/mp4")],
-        body,
-    ))
+    Ok(([(axum::http::header::CONTENT_TYPE, "video/mp4")], body))
+}
+
+/// Parse a single-range `Range: bytes=START-[END]` header. Suffix ranges
+/// (`bytes=-N`) are unsupported (browsers use start-anchored ranges for video).
+fn parse_byte_range(h: &str) -> Option<(u64, Option<u64>)> {
+    let spec = h.trim().strip_prefix("bytes=")?;
+    let (s, e) = spec.split_once('-')?;
+    let start: u64 = s.trim().parse().ok()?;
+    let end = if e.trim().is_empty() {
+        None
+    } else {
+        Some(e.trim().parse().ok()?)
+    };
+    Some((start, end))
+}
+
+/// Serve a fully-cached file with HTTP Range support so native `<video>` can
+/// seek into it. Returns 206 for a satisfiable range, else 200 with the whole
+/// file. Both advertise `Accept-Ranges: bytes`.
+async fn serve_seekable_file(
+    path: &std::path::Path,
+    range: Option<&str>,
+) -> Result<Response, (StatusCode, String)> {
+    let meta = tokio::fs::metadata(path)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, "Title not fully cached".into()))?;
+    let size = meta.len();
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let want = range.and_then(parse_byte_range).map(|(start, end)| {
+        let last = size.saturating_sub(1);
+        (start, end.unwrap_or(last).min(last))
+    });
+
+    if let Some((start, end)) = want {
+        if start > end || start >= size {
+            return Err((StatusCode::RANGE_NOT_SATISFIABLE, "Bad range".into()));
+        }
+        let len = end - start + 1;
+        file.seek(std::io::SeekFrom::Start(start))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let stream = tokio_util::io::ReaderStream::new(file.take(len));
+        let mut resp = Response::new(Body::from_stream(stream));
+        *resp.status_mut() = StatusCode::PARTIAL_CONTENT;
+        let h = resp.headers_mut();
+        h.insert(header::CONTENT_TYPE, "video/mp4".parse().unwrap());
+        h.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+        h.insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
+        h.insert(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{size}").parse().unwrap(),
+        );
+        h.insert(header::CACHE_CONTROL, DISC_CACHE_CONTROL.parse().unwrap());
+        Ok(resp)
+    } else {
+        let stream = tokio_util::io::ReaderStream::new(file);
+        let mut resp = Response::new(Body::from_stream(stream));
+        let h = resp.headers_mut();
+        h.insert(header::CONTENT_TYPE, "video/mp4".parse().unwrap());
+        h.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+        h.insert(header::CONTENT_LENGTH, size.to_string().parse().unwrap());
+        h.insert(header::CACHE_CONTROL, DISC_CACHE_CONTROL.parse().unwrap());
+        Ok(resp)
+    }
+}
+
+/// Serve the seekable (faststart) cache of a title with Range support. 404 if
+/// the title hasn't been fully cached + remuxed yet (client falls back to the
+/// streaming MSE path).
+async fn title_file(
+    State(state): State<AppState>,
+    Path((slug, titleset)): Path<(String, u32)>,
+    Query(params): Query<TranscodeParams>,
+    headers: HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    require_access(&state, &slug, &headers)?;
+    let key = cache_key(&slug, cache::Kind::Title, titleset, &params);
+    let path = state.cache.seekable_path(&key);
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    serve_seekable_file(&path, range).await
+}
+
+/// HEAD probe: 200 (+ size, Accept-Ranges) if the title is cached seekable,
+/// else 404. The client uses this to choose native range playback vs. MSE.
+async fn title_file_head(
+    State(state): State<AppState>,
+    Path((slug, titleset)): Path<(String, u32)>,
+    Query(params): Query<TranscodeParams>,
+    headers: HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    require_access(&state, &slug, &headers)?;
+    let key = cache_key(&slug, cache::Kind::Title, titleset, &params);
+    let path = state.cache.seekable_path(&key);
+    let meta = tokio::fs::metadata(&path)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, "Title not fully cached".into()))?;
+    let mut resp = Response::new(Body::empty());
+    let h = resp.headers_mut();
+    h.insert(header::CONTENT_TYPE, "video/mp4".parse().unwrap());
+    h.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    h.insert(
+        header::CONTENT_LENGTH,
+        meta.len().to_string().parse().unwrap(),
+    );
+    Ok(resp)
 }
 
 async fn transcode_titleset(
@@ -415,15 +554,51 @@ async fn transcode_titleset(
 
     let permit = acquire_transcode_slot(&state).await?;
 
+    // Ephemeral mid-title seek segments aren't cached; only the canonical
+    // from-start title transcode is (which then remuxes to a seekable file).
+    let cache_output = params.nocache.unwrap_or(0) == 0;
+
     let body = transcode::transcode_to_stream(
-        &vobs, &opts, &disc, titleset, false, state.cache.clone(), key, permit,
+        &vobs,
+        &opts,
+        &disc,
+        titleset,
+        false,
+        state.cache.clone(),
+        key,
+        permit,
+        cache_output,
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok((
-        [(axum::http::header::CONTENT_TYPE, "video/mp4")],
-        body,
-    ))
+    Ok(([(axum::http::header::CONTENT_TYPE, "video/mp4")], body))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::parse_byte_range;
+
+    #[test]
+    fn parses_open_ended_range() {
+        assert_eq!(parse_byte_range("bytes=1024-"), Some((1024, None)));
+    }
+
+    #[test]
+    fn parses_closed_range() {
+        assert_eq!(parse_byte_range("bytes=0-1023"), Some((0, Some(1023))));
+    }
+
+    #[test]
+    fn tolerates_whitespace() {
+        assert_eq!(parse_byte_range(" bytes=100-200 "), Some((100, Some(200))));
+    }
+
+    #[test]
+    fn rejects_malformed_or_suffix_ranges() {
+        assert_eq!(parse_byte_range("bytes=abc-"), None);
+        assert_eq!(parse_byte_range("bytes=-500"), None); // suffix range unsupported
+        assert_eq!(parse_byte_range("items=0-1"), None);
+        assert_eq!(parse_byte_range("0-1"), None);
+    }
+}

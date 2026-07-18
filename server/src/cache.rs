@@ -53,12 +53,22 @@ impl Cache {
         Self { root }
     }
 
-    /// Full path to the cached `.mp4` for a given key.
+    /// Full path to the cached (fragmented, streaming) `.mp4` for a given key.
     pub fn final_path(&self, key: &CacheKey) -> PathBuf {
         self.root
             .join(SCHEMA_VERSION)
             .join(&key.slug)
             .join(filename(key))
+    }
+
+    /// Path to the seekable (faststart, non-fragmented) remux of a title. Once
+    /// this exists the whole title is cached and the client can play it via a
+    /// native, range-seekable `<video>` — instant seeking with no re-transcode.
+    pub fn seekable_path(&self, key: &CacheKey) -> PathBuf {
+        self.root
+            .join(SCHEMA_VERSION)
+            .join(&key.slug)
+            .join(format!("{}.seek.mp4", filename_stem(key)))
     }
 
     /// Per-request temp path. Two concurrent transcodes of the same key
@@ -156,12 +166,7 @@ where
 /// After ffmpeg has exited and the tee task has flushed the tmp file,
 /// either atomically rename it into the cache slot (on success) or delete
 /// it (on failure).
-pub async fn finalize_tmp(
-    tmp_path: &Path,
-    final_path: &Path,
-    keep: bool,
-    bytes_total: u64,
-) {
+pub async fn finalize_tmp(tmp_path: &Path, final_path: &Path, keep: bool, bytes_total: u64) {
     if keep {
         match tokio::fs::rename(tmp_path, final_path).await {
             Ok(()) => tracing::info!(
@@ -198,6 +203,7 @@ pub fn spawn_tee_and_finalize<K>(
     stdout: tokio::process::ChildStdout,
     mut child: tokio::process::Child,
     keep_alive: K,
+    cache_output: bool,
 ) -> axum::body::Body
 where
     K: Send + 'static,
@@ -209,16 +215,21 @@ where
     tokio::spawn(async move {
         let _keep_alive = keep_alive;
 
-        if let Err(e) = cache.ensure_dir(&key).await {
-            tracing::warn!("Failed to create cache dir for {}: {e}", key.slug);
-        }
-
-        let file = match tokio::fs::File::create(&tmp_path).await {
-            Ok(f) => Some(f),
-            Err(e) => {
-                tracing::warn!("Failed to open cache tmp {}: {e}", tmp_path.display());
-                None
+        // Ephemeral segments (mid-title seeks) stream without caching, so they
+        // don't accumulate overlapping per-sector tails on disk.
+        let file = if cache_output {
+            if let Err(e) = cache.ensure_dir(&key).await {
+                tracing::warn!("Failed to create cache dir for {}: {e}", key.slug);
             }
+            match tokio::fs::File::create(&tmp_path).await {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    tracing::warn!("Failed to open cache tmp {}: {e}", tmp_path.display());
+                    None
+                }
+            }
+        } else {
+            None
         };
 
         let (bytes_total, file_ok) = tee_to_channel_and_file(stdout, tx, file).await;
@@ -235,11 +246,65 @@ where
             }
         };
 
-        finalize_tmp(&tmp_path, &final_path, status_ok && file_ok, bytes_total).await;
+        if !cache_output {
+            return;
+        }
+
+        let cached_ok = status_ok && file_ok;
+        finalize_tmp(&tmp_path, &final_path, cached_ok, bytes_total).await;
+
+        // Once a full title is cached, remux it to a faststart (non-fragmented,
+        // indexed) file so future views can seek natively via HTTP Range with no
+        // re-transcode. The fragmented original is then removed — clients use
+        // the seekable file, so nothing else needs it. Menus don't need seeking.
+        if cached_ok && key.kind == Kind::Title {
+            let seek_path = cache.seekable_path(&key);
+            remux_to_seekable(&final_path, &seek_path).await;
+        }
     });
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
     axum::body::Body::from_stream(stream)
+}
+
+/// Stream-copy a fragmented cache file into a faststart (moov-at-front,
+/// non-fragmented) MP4 that native `<video>` can range-seek. On success the
+/// fragmented original is deleted (only the seekable file is served from here
+/// on). Best-effort: any failure just leaves the fragmented cache in place.
+async fn remux_to_seekable(final_path: &Path, seek_path: &Path) {
+    let tmp = seek_path.with_extension("seek.tmp");
+    let status = tokio::process::Command::new("ffmpeg")
+        .args(["-y", "-i"])
+        .arg(final_path)
+        .args(["-c", "copy", "-movflags", "+faststart", "-f", "mp4"])
+        .arg(&tmp)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+
+    match status {
+        Ok(s) if s.success() => match tokio::fs::rename(&tmp, seek_path).await {
+            Ok(()) => {
+                tracing::info!("Remuxed seekable cache: {}", seek_path.display());
+                // The fragmented copy is no longer served; reclaim its space.
+                let _ = tokio::fs::remove_file(final_path).await;
+            }
+            Err(e) => {
+                tracing::warn!("Seekable rename failed ({e}); keeping fragmented cache");
+                let _ = tokio::fs::remove_file(&tmp).await;
+            }
+        },
+        Ok(s) => {
+            tracing::warn!("Seekable remux exited {s}; keeping fragmented cache");
+            let _ = tokio::fs::remove_file(&tmp).await;
+        }
+        Err(e) => {
+            tracing::warn!("Seekable remux failed to spawn ({e}); keeping fragmented cache");
+            let _ = tokio::fs::remove_file(&tmp).await;
+        }
+    }
 }
 
 fn filename(key: &CacheKey) -> String {
@@ -290,6 +355,23 @@ mod tests {
         assert_eq!(
             cache().final_path(&key),
             PathBuf::from("/var/cache/webdvd/v1/THE_MATRIX/title_1_0_499999_-_-.mp4"),
+        );
+    }
+
+    #[test]
+    fn seekable_path_uses_seek_mp4_suffix() {
+        let key = CacheKey {
+            slug: "THE_MATRIX".into(),
+            kind: Kind::Title,
+            titleset: 2,
+            sector: Some(4262),
+            last_sector: Some(2878796),
+            start_ms: None,
+            duration_ms: None,
+        };
+        assert_eq!(
+            cache().seekable_path(&key),
+            PathBuf::from("/var/cache/webdvd/v1/THE_MATRIX/title_2_4262_2878796_-_-.seek.mp4"),
         );
     }
 
@@ -394,7 +476,10 @@ mod tests {
 
         let (total, file_ok) = tee_to_channel_and_file(reader, tx, Some(file)).await;
         assert_eq!(total, input.len() as u64);
-        assert!(file_ok, "file write must succeed even if HTTP client dropped");
+        assert!(
+            file_ok,
+            "file write must succeed even if HTTP client dropped"
+        );
 
         let on_disk = tokio::fs::read(&path).await.unwrap();
         assert_eq!(on_disk, input);
