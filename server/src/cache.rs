@@ -94,6 +94,30 @@ impl Cache {
         &self.root
     }
 
+    /// Remove cache directories from older schema versions. Called once at
+    /// startup: after SCHEMA_VERSION is bumped (a codec change), the previous
+    /// `vN` dir holds transcodes the current build can't serve, so a deploy
+    /// self-cleans them. Only touches `v<digits>` dirs other than the current
+    /// one; best-effort, never fails startup.
+    pub fn prune_stale_schemas(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return; // cache root not created yet — nothing to prune
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let is_version_dir = name.len() > 1
+                && name.starts_with('v')
+                && name[1..].chars().all(|c| c.is_ascii_digit());
+            if is_version_dir && name != SCHEMA_VERSION && entry.path().is_dir() {
+                match std::fs::remove_dir_all(entry.path()) {
+                    Ok(()) => tracing::info!("Pruned stale cache schema dir: {name}"),
+                    Err(e) => tracing::warn!("Failed to prune stale cache dir {name}: {e}"),
+                }
+            }
+        }
+    }
+
     /// If the final cached file exists, return a streaming body backed by it.
     /// Returns None if the file is missing — caller should fall through to
     /// transcoding.
@@ -528,6 +552,22 @@ mod tests {
         assert!(!tmp.exists());
         assert!(final_path.exists());
         assert_eq!(tokio::fs::read(&final_path).await.unwrap(), b"new");
+    }
+
+    #[test]
+    fn prune_stale_schemas_removes_only_old_version_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Old schema, current schema, and an unrelated dir.
+        std::fs::create_dir_all(root.join("v1").join("SomeDisc")).unwrap();
+        std::fs::create_dir_all(root.join(SCHEMA_VERSION).join("SomeDisc")).unwrap();
+        std::fs::create_dir_all(root.join("misc")).unwrap();
+
+        Cache::new(root.to_path_buf()).prune_stale_schemas();
+
+        assert!(!root.join("v1").exists(), "old schema dir must be pruned");
+        assert!(root.join(SCHEMA_VERSION).exists(), "current schema kept");
+        assert!(root.join("misc").exists(), "non-version dirs untouched");
     }
 
     #[test]

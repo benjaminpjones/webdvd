@@ -72,6 +72,12 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&cache_dir)?;
     tracing::info!("Transcode cache at {}", cache_dir.display());
 
+    let cache = cache::Cache::new(cache_dir);
+    // Drop cache dirs from earlier schema versions (e.g. after a codec change
+    // bumped SCHEMA_VERSION) so a deploy self-cleans stale, now-unservable
+    // transcodes instead of leaving them to waste disk.
+    cache.prune_stale_schemas();
+
     if args.max_concurrent_transcodes == 0 {
         anyhow::bail!("--max-concurrent-transcodes must be at least 1");
     }
@@ -83,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState {
         library: Arc::new(lib),
-        cache: Arc::new(cache::Cache::new(cache_dir)),
+        cache: Arc::new(cache),
         auth: Arc::new(auth::Auth::from_env()),
         transcode_limit: Arc::new(Semaphore::new(args.max_concurrent_transcodes)),
         transcode_queue_timeout: std::time::Duration::from_secs(args.transcode_queue_timeout_secs),
