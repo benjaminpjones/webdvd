@@ -21,6 +21,9 @@ import {
   type DiscStructure,
   type ButtonInfo,
   type ButtonColorTable,
+  type NavEvent,
+  STUB_MAX_MS,
+  STUB_MAX_SECTORS,
 } from "./dvdnav";
 import { demuxSubpictures } from "./spu-demux";
 import { decodeSpuPacket, type SpuImage } from "./spu-decode";
@@ -677,6 +680,40 @@ export class SessionManager {
   }
 
   /**
+   * Recognise a "dispatcher stub" title and let the VM read through it instead
+   * of treating it as something to play.
+   *
+   * Discs commonly wire a menu button to a degenerate PGC — a fraction of a
+   * second over a handful of sectors, no real content — whose post-command
+   * chain picks the actual destination. Shrek's Play button lands on a 500ms /
+   * 38-sector PGC that jumps to a VMG dispatcher, which in turn JumpTTs to the
+   * feature (possibly to a bookmarked chapter). Transcoding the stub yields a
+   * clip that looks like nothing happened, so we instead open a read window
+   * over its sectors and keep driving: the VM plays through it, runs the
+   * post-commands, and reports the real title a few events later.
+   *
+   * Returns true if the caller should keep driving the VM.
+   */
+  private traverseDispatcherStub(ev: NavEvent, traversed: Set<string>): boolean {
+    const first = ev.firstSector ?? 0;
+    const last = ev.pgcLastSector ?? 0;
+    const sectors = last - first + 1;
+    if ((ev.pgcLengthMs ?? 0) > STUB_MAX_MS) return false;
+    if (sectors <= 0 || sectors > STUB_MAX_SECTORS) return false;
+
+    const key = `${this.currentVts}:${first}:${last}`;
+    if (traversed.has(key)) return false; // already tried — play it rather than loop
+    traversed.add(key);
+
+    if (!this.session.openTitleWindow(this.currentVts, first, last)) return false;
+    this.log(
+      `Dispatcher stub (title ${ev.title}, ${ev.pgcLengthMs}ms, sectors ${first}-${last}) — ` +
+        `running its post-commands instead of playing it`,
+    );
+    return true;
+  }
+
+  /**
    * Drive the VM event loop until we find a playback target, enter a menu, or reach STOP.
    * Yields to the browser event loop periodically to avoid blocking UI.
    * @param acceptTitles If false, skip VTS title cells (for First Play navigation).
@@ -699,6 +736,9 @@ export class SessionManager {
     const startVts = this.currentVts; // VTS before this driveVM call
     let firstMenuCellSector = -1; // first menu cell sector (for intro animations)
     const MAX_ROUNDS = 500;
+    // Dispatcher stubs already read through in this drive, so a stub that
+    // links back to itself can't spin forever.
+    const stubsTraversed = new Set<string>();
 
     for (let round = 0; round < MAX_ROUNDS; round++) {
       // Yield to browser between rounds
@@ -761,6 +801,7 @@ export class SessionManager {
           );
           if (ev.isVts && ev.title && ev.title > 0) {
             if (acceptTitles) {
+              if (this.traverseDispatcherStub(ev, stubsTraversed)) continue;
               return {
                 vts: this.currentVts,
                 title: ev.title,
